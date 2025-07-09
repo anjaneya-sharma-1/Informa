@@ -1,3 +1,8 @@
+# Patch sqlite3 for ChromaDB
+import sys
+import pysqlite3
+sys.modules["sqlite3"] = pysqlite3
+
 import sqlite3
 import json
 import numpy as np
@@ -9,6 +14,7 @@ import asyncio
 import logging
 from chromadb import PersistentClient
 from chromadb.config import Settings
+
 
 logger = logging.getLogger(__name__)
 
