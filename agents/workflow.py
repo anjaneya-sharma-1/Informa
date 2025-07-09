@@ -4,9 +4,6 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 import json
 
-from langgraph.graph import StateGraph, END
-from langchain_core.messages import HumanMessage, AIMessage
-
 from .news_collector import NewsCollectorAgent
 from .sentiment_analyzer import SentimentAnalyzerAgent
 from .bias_detector import BiasDetectorAgent
@@ -18,7 +15,7 @@ from utils.config import Config
 logger = logging.getLogger(__name__)
 
 class NewsAnalysisWorkflow:
-    """Main LangGraph workflow orchestrating all agents"""
+    """Simplified workflow orchestrating all agents"""
     
     def __init__(self, config: Config, database: VectorDatabase):
         self.config = config
@@ -40,210 +37,119 @@ class NewsAnalysisWorkflow:
             'articles_processed': 0
         }
         
-        # Build the workflow graph
-        self.workflow = self._build_workflow()
-        
         logger.info("NewsAnalysisWorkflow initialized successfully")
     
-    def _build_workflow(self) -> StateGraph:
-        """Build the LangGraph workflow"""
+    async def run_complete_analysis(self, user_input: Dict[str, Any]) -> Dict[str, Any]:
+        """Run the complete news analysis workflow sequentially"""
+        start_time = datetime.now()
+        execution_id = f"exec_{int(start_time.timestamp())}"
         
-        # Define the workflow graph
-        workflow = StateGraph(Dict[str, Any])
-        
-        # Add nodes (agents)
-        workflow.add_node("collect_news", self._collect_news_node)
-        workflow.add_node("analyze_sentiment", self._analyze_sentiment_node)
-        workflow.add_node("detect_bias", self._detect_bias_node)
-        workflow.add_node("fact_check", self._fact_check_node)
-        workflow.add_node("store_results", self._store_results_node)
-        
-        # Define the workflow edges
-        workflow.set_entry_point("collect_news")
-        workflow.add_edge("collect_news", "analyze_sentiment")
-        workflow.add_edge("analyze_sentiment", "detect_bias")
-        workflow.add_edge("detect_bias", "fact_check")
-        workflow.add_edge("fact_check", "store_results")
-        workflow.add_edge("store_results", END)
-        
-        return workflow.compile()
-    
-    async def _collect_news_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        """News collection node"""
         try:
-            logger.info("Starting news collection...")
+            logger.info(f"Starting workflow execution {execution_id}")
             
-            # Extract parameters from user input
-            topics = state.get('user_input', {}).get('topics', ['technology'])
-            sources = state.get('user_input', {}).get('sources', ['bbc'])
-            max_articles = state.get('user_input', {}).get('max_articles', 20)
-            filter_type = state.get('user_input', {}).get('filter_type', 'latest')
+            # Step 1: Collect news
+            logger.info("Step 1: Collecting news...")
+            topics = user_input.get('topics', ['technology'])
+            sources = user_input.get('sources', ['bbc'])
+            max_articles = user_input.get('max_articles', 20)
             
-            # Collect news articles
             articles = await self.news_collector.collect_news(
                 topics=topics,
                 sources=sources,
                 max_articles=max_articles,
-                filter_type=filter_type
+                filter_type='latest'
             )
             
-            # Update state
-            state['articles'] = articles
-            state['metrics'] = state.get('metrics', {})
-            state['metrics']['articles_collected'] = len(articles)
-            state['errors'] = state.get('errors', [])
+            if not articles:
+                return {
+                    'success': False,
+                    'error': 'No articles collected',
+                    'execution_id': execution_id
+                }
             
             logger.info(f"Collected {len(articles)} articles")
             
-        except Exception as e:
-            error_msg = f"Error in news collection: {str(e).replace(chr(0), '')}"
-            state['errors'] = state.get('errors', []) + [error_msg]
-            logger.error(error_msg)
-        
-        return state
-    
-    async def _analyze_sentiment_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        """Sentiment analysis node"""
-        try:
-            logger.info("Starting sentiment analysis...")
-            
-            articles = state.get('articles', [])
+            # Step 2: Analyze sentiment
+            logger.info("Step 2: Analyzing sentiment...")
             sentiment_results = {}
-            
-            for article in articles:
-                # Combine title and content for analysis - ensure they are strings
-                title = str(article.get('title', '') or '')
-                content = str(article.get('content', '') or '')
-                text = f"{title} {content}"
-                
-                # Analyze sentiment
-                sentiment = await self.sentiment_analyzer.analyze(text)
-                sentiment_results[article['id']] = {
-                    'sentiment': sentiment
-                }
-            
-            # Update analysis results
-            analysis_results = state.get('analysis_results', {})
-            for article_id, result in sentiment_results.items():
-                if article_id not in analysis_results:
-                    analysis_results[article_id] = {}
-                analysis_results[article_id].update(result)
-            
-            state['analysis_results'] = analysis_results
-            state['metrics'] = state.get('metrics', {})
-            state['metrics']['sentiment_analyzed'] = len(sentiment_results)
-            state['errors'] = state.get('errors', [])
-            
-            logger.info(f"Analyzed sentiment for {len(sentiment_results)} articles")
-            
-        except Exception as e:
-            error_msg = f"Error in sentiment analysis: {str(e).replace(chr(0), '')}"
-            state['errors'] = state.get('errors', []) + [error_msg]
-            logger.error(error_msg)
-        
-        return state
-    
-    async def _detect_bias_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        """Bias detection node"""
-        try:
-            logger.info("Starting bias detection...")
-            
-            articles = state.get('articles', [])
-            bias_results = {}
-            
-            for article in articles:
-                # Combine title and content for analysis - ensure they are strings
-                title = str(article.get('title', '') or '')
-                content = str(article.get('content', '') or '')
-                text = f"{title} {content}"
-                source = str(article.get('source', '') or '')
-                
-                # Detect bias
-                bias_analysis = await self.bias_detector.analyze_bias(text, source)
-                bias_results[article['id']] = {
-                    'bias_score': bias_analysis.get('overall_bias_score', 0),
-                    'bias_details': bias_analysis
-                }
-            
-            # Update analysis results
-            analysis_results = state.get('analysis_results', {})
-            for article_id, result in bias_results.items():
-                if article_id not in analysis_results:
-                    analysis_results[article_id] = {}
-                analysis_results[article_id].update(result)
-            
-            state['analysis_results'] = analysis_results
-            state['metrics'] = state.get('metrics', {})
-            state['metrics']['bias_analyzed'] = len(bias_results)
-            state['errors'] = state.get('errors', [])
-            
-            logger.info(f"Analyzed bias for {len(bias_results)} articles")
-            
-        except Exception as e:
-            error_msg = f"Error in bias detection: {str(e).replace(chr(0), '')}"
-            state['errors'] = state.get('errors', []) + [error_msg]
-            logger.error(error_msg)
-        
-        return state
-    
-    async def _fact_check_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        """Fact-checking node"""
-        try:
-            logger.info("Starting fact-checking...")
-            
-            articles = state.get('articles', [])
-            fact_check_results = {}
-            
-            # Only fact-check a subset to avoid rate limits
-            articles_to_check = articles[:5]  # Limit to first 5 articles
-            
-            for article in articles_to_check:
-                # Combine title and content for fact-checking
-                title = article.get('title', '') or ''
-                content = article.get('content', '') or ''
-                text = f"{title} {content}"
-                
-                # Fact-check the article
-                fact_check = await self.fact_checker.check_article(text, article.get('url'))
-                fact_check_results[article['id']] = {
-                    'credibility_score': fact_check.get('credibility_score', 0.5),
-                    'fact_check_details': fact_check
-                }
-            
-            # Update analysis results
-            analysis_results = state.get('analysis_results', {})
-            for article_id, result in fact_check_results.items():
-                if article_id not in analysis_results:
-                    analysis_results[article_id] = {}
-                analysis_results[article_id].update(result)
-            
-            state['analysis_results'] = analysis_results
-            state['metrics'] = state.get('metrics', {})
-            state['metrics']['fact_checked'] = len(fact_check_results)
-            state['errors'] = state.get('errors', [])
-            
-            logger.info(f"Fact-checked {len(fact_check_results)} articles")
-            
-        except Exception as e:
-            error_msg = f"Error in fact-checking: {str(e).replace(chr(0), '')}"
-            state['errors'] = state.get('errors', []) + [error_msg]
-            logger.error(error_msg)
-        
-        return state
-    
-    async def _store_results_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        """Store results in database node"""
-        try:
-            logger.info("Starting results storage...")
-            
-            articles = state.get('articles', [])
-            analysis_results = state.get('analysis_results', {})
-            
-            # Store articles and analysis in vector database
-            stored_count = 0
             for article in articles:
                 try:
-                    # Prepare article data with analysis
+                    title = str(article.get('title', '') or '')
+                    content = str(article.get('content', '') or '')
+                    text = f"{title} {content}"
+                    
+                    sentiment = await self.sentiment_analyzer.analyze(text)
+                    sentiment_results[article['id']] = {
+                        'sentiment': sentiment
+                    }
+                except Exception as e:
+                    logger.error(f"Error analyzing sentiment for article {article['id']}: {e}")
+                    sentiment_results[article['id']] = {
+                        'sentiment': {'label': 'neutral', 'score': 0.0}
+                    }
+            
+            # Step 3: Detect bias
+            logger.info("Step 3: Detecting bias...")
+            bias_results = {}
+            for article in articles:
+                try:
+                    title = str(article.get('title', '') or '')
+                    content = str(article.get('content', '') or '')
+                    text = f"{title} {content}"
+                    source = str(article.get('source', '') or '')
+                    
+                    bias_analysis = await self.bias_detector.analyze_bias(text, source)
+                    bias_results[article['id']] = {
+                        'bias_score': bias_analysis.get('overall_bias_score', 0),
+                        'bias_details': bias_analysis
+                    }
+                except Exception as e:
+                    logger.error(f"Error detecting bias for article {article['id']}: {e}")
+                    bias_results[article['id']] = {
+                        'bias_score': 0.5,
+                        'bias_details': {}
+                    }
+            
+            # Step 4: Fact check (limited to first 3 articles)
+            logger.info("Step 4: Fact checking...")
+            fact_check_results = {}
+            for article in articles[:3]:  # Limit to first 3 articles
+                try:
+                    title = article.get('title', '') or ''
+                    content = article.get('content', '') or ''
+                    text = f"{title} {content}"
+                    
+                    fact_check = await self.fact_checker.check_article(text, article.get('url'))
+                    fact_check_results[article['id']] = {
+                        'credibility_score': fact_check.get('credibility_score', 0.5),
+                        'fact_check_details': fact_check
+                    }
+                except Exception as e:
+                    logger.error(f"Error fact-checking article {article['id']}: {e}")
+                    fact_check_results[article['id']] = {
+                        'credibility_score': 0.5,
+                        'fact_check_details': {}
+                    }
+            
+            # Step 5: Store results
+            logger.info("Step 5: Storing results...")
+            stored_count = 0
+            analysis_results = {}
+            
+            for article in articles:
+                try:
+                    # Combine all analysis results
+                    article_analysis = {}
+                    if article['id'] in sentiment_results:
+                        article_analysis.update(sentiment_results[article['id']])
+                    if article['id'] in bias_results:
+                        article_analysis.update(bias_results[article['id']])
+                    if article['id'] in fact_check_results:
+                        article_analysis.update(fact_check_results[article['id']])
+                    
+                    analysis_results[article['id']] = article_analysis
+                    
+                    # Store in database
                     article_data = {
                         'id': article['id'],
                         'title': article.get('title', ''),
@@ -251,48 +157,14 @@ class NewsAnalysisWorkflow:
                         'source': article.get('source', ''),
                         'url': article.get('url', ''),
                         'published_at': article.get('published_at', ''),
-                        'analysis': analysis_results.get(article['id'], {})
+                        'analysis': article_analysis
                     }
                     
-                    # Store in database
-                    self.database.add_article(article_data)
+                    self.database.add_article(article_data, article_analysis)
                     stored_count += 1
                     
                 except Exception as e:
                     logger.error(f"Error storing article {article['id']}: {e}")
-            
-            state['metrics'] = state.get('metrics', {})
-            state['metrics']['stored'] = stored_count
-            state['errors'] = state.get('errors', [])
-            
-            logger.info(f"Stored {stored_count} articles in database")
-            
-        except Exception as e:
-            error_msg = f"Error in results storage: {str(e).replace(chr(0), '')}"
-            state['errors'] = state.get('errors', []) + [error_msg]
-            logger.error(error_msg)
-        
-        return state
-    
-    async def run_complete_analysis(self, user_input: Dict[str, Any]) -> Dict[str, Any]:
-        """Run the complete news analysis workflow"""
-        start_time = datetime.now()
-        execution_id = f"exec_{int(start_time.timestamp())}"
-        
-        try:
-            logger.info(f"Starting workflow execution {execution_id}")
-            
-            # Initialize state as dictionary
-            state = {
-                'user_input': user_input,
-                'articles': [],
-                'analysis_results': {},
-                'metrics': {},
-                'errors': []
-            }
-            
-            # Execute the workflow
-            final_state = await self.workflow.ainvoke(state)
             
             # Calculate execution time
             end_time = datetime.now()
@@ -300,38 +172,41 @@ class NewsAnalysisWorkflow:
             
             # Update performance metrics
             self.performance_metrics['total_executions'] += 1
-            if not final_state.get('errors'):
-                self.performance_metrics['successful_executions'] += 1
-            
+            self.performance_metrics['successful_executions'] += 1
             self.performance_metrics['avg_processing_time'] = (
                 (self.performance_metrics['avg_processing_time'] * (self.performance_metrics['total_executions'] - 1) + duration) /
                 self.performance_metrics['total_executions']
             )
-            
-            self.performance_metrics['articles_processed'] += len(final_state.get('articles', []))
+            self.performance_metrics['articles_processed'] += len(articles)
             
             # Log execution
             execution_log = {
                 'id': execution_id,
                 'timestamp': start_time.isoformat(),
                 'duration': duration,
-                'status': 'success' if not final_state.get('errors') else 'error',
-                'articles_processed': len(final_state.get('articles', [])),
-                'errors': final_state.get('errors', []),
-                'metrics': final_state.get('metrics', {})
+                'status': 'success',
+                'articles_processed': len(articles),
+                'errors': [],
+                'metrics': {
+                    'articles_collected': len(articles),
+                    'sentiment_analyzed': len(sentiment_results),
+                    'bias_analyzed': len(bias_results),
+                    'fact_checked': len(fact_check_results),
+                    'stored': stored_count
+                }
             }
             
             self.execution_logs.append(execution_log)
             
             # Return results
             return {
-                'success': not final_state.get('errors'),
-                'articles': final_state.get('articles', []),
-                'analysis_results': final_state.get('analysis_results', {}),
-                'workflow_summary': final_state.get('metrics', {}),
+                'success': True,
+                'articles': articles,
+                'analysis_results': analysis_results,
+                'workflow_summary': execution_log['metrics'],
                 'execution_id': execution_id,
                 'duration': duration,
-                'errors': final_state.get('errors', [])
+                'errors': []
             }
             
         except Exception as e:
