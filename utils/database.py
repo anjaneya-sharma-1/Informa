@@ -1,7 +1,12 @@
 # Patch sqlite3 for ChromaDB
 import sys
-import pysqlite3
-sys.modules["sqlite3"] = pysqlite3
+try:
+    import pysqlite3
+    # Patch for chromadb compatibility when using streamlit
+    sys.modules["sqlite3"] = pysqlite3
+except ImportError:
+    # Use standard sqlite3 if pysqlite3 is not available
+    pass
 
 import sqlite3
 import json
@@ -266,46 +271,72 @@ class VectorDatabase:
         
         return embedding
     
-    async def semantic_search(self, query: str, embedding_model, limit: int = 5) -> List[Dict[str, Any]]:
-        """Perform semantic search using embeddings"""
+    async def semantic_search(self, query, embedding_or_model, limit: int = 5, use_api_embedding: bool = False) -> List[Dict[str, Any]]:
+        """Perform semantic search using either a model or a precomputed embedding vector."""
         try:
-            # Query the collection
-            results = self.collection.query(
-                query_texts=[query],
-                n_results=limit,
-                include=['documents', 'metadatas', 'distances']
-            )
-            
-            # Process results
-            articles = []
-            if results['documents'] and len(results['documents']) > 0:
-                for i, (doc, metadata, distance) in enumerate(zip(
-                    results['documents'][0],
-                    results['metadatas'][0],
-                    results['distances'][0]
-                )):
-                    # Calculate relevance score (inverse of distance)
-                    relevance_score = max(0.0, 1.0 - distance)
-                    
-                    article = {
-                        'id': results['ids'][0][i],
-                        'title': metadata.get('title', ''),
-                        'content': doc,
-                        'source': metadata.get('source', ''),
-                        'url': metadata.get('url', ''),
-                        'published_at': metadata.get('published_at', ''),
-                        'topic': metadata.get('topic', ''),
-                        'sentiment_label': metadata.get('sentiment_label', 'neutral'),
-                        'sentiment_score': metadata.get('sentiment_score', 0.0),
-                        'bias_score': metadata.get('bias_score', 0.0),
-                        'credibility_score': metadata.get('credibility_score', 0.5),
-                        'relevance_score': relevance_score
-                    }
-                    articles.append(article)
-            
-            logger.debug(f"Semantic search returned {len(articles)} articles")
-            return articles
-            
+            if use_api_embedding:
+                # embedding_or_model is a precomputed embedding vector (list of floats)
+                query_embedding = np.array(embedding_or_model)
+                # Fetch all embeddings from DB
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
+                cursor.execute('SELECT article_id, embedding_vector FROM embeddings')
+                rows = cursor.fetchall()
+                similarities = []
+                for article_id, embedding_json in rows:
+                    try:
+                        embedding = np.array(json.loads(embedding_json))
+                        # Cosine similarity
+                        if np.linalg.norm(embedding) == 0 or np.linalg.norm(query_embedding) == 0:
+                            sim = 0.0
+                        else:
+                            sim = float(np.dot(query_embedding, embedding) / (np.linalg.norm(query_embedding) * np.linalg.norm(embedding)))
+                        similarities.append((article_id, sim))
+                    except Exception as e:
+                        continue
+                # Sort by similarity
+                similarities = sorted(similarities, key=lambda x: x[1], reverse=True)[:limit]
+                # Fetch article data
+                results = []
+                for article_id, sim in similarities:
+                    article_data = self._get_article_with_analysis(article_id, cursor)
+                    if article_data:
+                        article_data['relevance_score'] = sim
+                        results.append(article_data)
+                conn.close()
+                return results
+            else:
+                # embedding_or_model is a model object, use ChromaDB as before
+                results = self.collection.query(
+                    query_texts=[query],
+                    n_results=limit,
+                    include=['documents', 'metadatas', 'distances']
+                )
+                articles = []
+                if results['documents'] and len(results['documents']) > 0:
+                    for i, (doc, metadata, distance) in enumerate(zip(
+                        results['documents'][0],
+                        results['metadatas'][0],
+                        results['distances'][0]
+                    )):
+                        relevance_score = max(0.0, 1.0 - distance)
+                        article = {
+                            'id': results['ids'][0][i],
+                            'title': metadata.get('title', ''),
+                            'content': doc,
+                            'source': metadata.get('source', ''),
+                            'url': metadata.get('url', ''),
+                            'published_at': metadata.get('published_at', ''),
+                            'topic': metadata.get('topic', ''),
+                            'sentiment_label': metadata.get('sentiment_label', 'neutral'),
+                            'sentiment_score': metadata.get('sentiment_score', 0.0),
+                            'bias_score': metadata.get('bias_score', 0.0),
+                            'credibility_score': metadata.get('credibility_score', 0.5),
+                            'relevance_score': relevance_score
+                        }
+                        articles.append(article)
+                logger.debug(f"Semantic search returned {len(articles)} articles")
+                return articles
         except Exception as e:
             logger.error(f"Error in semantic search: {e}")
             return []
@@ -465,17 +496,7 @@ class VectorDatabase:
             logger.error(f"Error clearing database: {e}")
             return False
     
-    def health_check(self) -> bool:
-        """Check if the database is healthy"""
-        try:
-            # Try to get collection count
-            count = self.collection.count()
-            return True
-            
-        except Exception as e:
-            logger.error(f"Database health check failed: {e}")
-            return False
-    
+     
     def get_statistics(self) -> Dict[str, Any]:
         """Get database statistics"""
         try:

@@ -1,23 +1,52 @@
 import asyncio
 import logging
-from typing import Dict, Any, List, Optional
+from typing import List, Dict, Any, Optional, Callable
 from datetime import datetime
 import json
 
-from .news_collector import NewsCollectorAgent
-from .sentiment_analyzer import SentimentAnalyzerAgent
-from .bias_detector import BiasDetectorAgent
-from .fact_checker import FactCheckerAgent
-from .rag_agent import RAGAgent
+# LangGraph imports
+from langgraph.graph import StateGraph, END, START
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+
+# Local imports
+from agents.news_collector import NewsCollectorAgent
+from agents.sentiment_analyzer import SentimentAnalyzerAgent
+from agents.bias_detector import BiasDetectorAgent
+from agents.fact_checker import FactCheckerAgent
 from utils.database import VectorDatabase
-from utils.config import Config
+from utils.config import AppConfig
 
 logger = logging.getLogger(__name__)
 
-class NewsAnalysisWorkflow:
-    """Simplified workflow orchestrating all agents"""
+class WorkflowState:
+    """State management for the news analysis workflow"""
     
-    def __init__(self, config: Config, database: VectorDatabase):
+    def __init__(self):
+        # Configuration
+        self.topics: List[str] = []
+        self.sources: List[str] = []
+        self.max_articles: int = 20
+        
+        # Data
+        self.collected_articles: List[Dict[str, Any]] = []
+        self.analyzed_articles: List[Dict[str, Any]] = []
+        self.stored_articles: List[Dict[str, Any]] = []
+        
+        # LangGraph messaging
+        self.messages: List[BaseMessage] = []
+        self.metadata: Dict[str, Any] = {}
+        
+        # Status tracking
+        self.errors: List[str] = []
+        self.progress: int = 0
+        self.current_step: str = ""
+        self.start_time: str = datetime.now().isoformat()
+        self.last_update_time: str = datetime.now().isoformat()
+
+class NewsWorkflow:
+    """Multi-agent news analysis workflow using LangGraph"""
+    
+    def __init__(self, config, database: VectorDatabase):
         self.config = config
         self.database = database
         
@@ -26,369 +55,584 @@ class NewsAnalysisWorkflow:
         self.sentiment_analyzer = SentimentAnalyzerAgent()
         self.bias_detector = BiasDetectorAgent()
         self.fact_checker = FactCheckerAgent(config)
-        self.rag_agent = RAGAgent(config, database)
         
-        # Workflow state
-        self.execution_logs: List[Dict[str, Any]] = []
-        self.performance_metrics: Dict[str, Any] = {
-            'total_executions': 0,
-            'successful_executions': 0,
-            'avg_processing_time': 0.0,
-            'articles_processed': 0
+        # Build workflow graph
+        self.workflow = self._build_workflow()
+    
+    def _build_workflow(self) -> StateGraph:
+        """Build the LangGraph workflow with proper agent orchestration"""
+        
+        # Define the workflow graph with dynamic state management
+        workflow = StateGraph(dict)
+        
+        # Add specialized agent nodes
+        workflow.add_node("topic_selection", self._topic_selection_node)
+        workflow.add_node("news_collection", self._news_collection_node)
+        workflow.add_node("sentiment_analysis", self._sentiment_analysis_node)
+        workflow.add_node("bias_detection", self._bias_detection_node)
+        workflow.add_node("content_synthesis", self._content_synthesis_node)
+        workflow.add_node("vector_storage", self._vector_storage_node)
+        workflow.add_node("completion", self._completion_node)
+        
+        # Define the workflow edges for proper orchestration
+        workflow.add_edge("topic_selection", "news_collection")
+        workflow.add_edge("news_collection", "sentiment_analysis")
+        workflow.add_edge("sentiment_analysis", "bias_detection")
+        workflow.add_edge("bias_detection", "content_synthesis")
+        workflow.add_edge("content_synthesis", "vector_storage")
+        workflow.add_edge("vector_storage", "completion")
+        workflow.add_edge("completion", END)
+        
+        # Set entry point
+        workflow.set_entry_point("topic_selection")
+        
+        return workflow.compile()
+    
+    async def execute_workflow(
+        self, 
+        topics: List[str], 
+        sources: List[str], 
+        max_articles: int = 20,
+        progress_callback: Optional[Callable[[str, int], None]] = None
+    ) -> List[Dict[str, Any]]:
+        """Execute the complete news analysis workflow"""
+        
+        # Initialize state
+        initial_state = {
+            "topics": topics,
+            "sources": sources,
+            "max_articles": max_articles,
+            "collected_articles": [],
+            "analyzed_articles": [],
+            "stored_articles": [],
+            "errors": [],
+            "progress": 0,
+            "current_step": "",
+            "progress_callback": progress_callback
         }
         
-        logger.info("NewsAnalysisWorkflow initialized successfully")
-    
-    async def run_complete_analysis(self, user_input: Dict[str, Any]) -> Dict[str, Any]:
-        """Run the complete news analysis workflow sequentially"""
-        start_time = datetime.now()
-        execution_id = f"exec_{int(start_time.timestamp())}"
-        
         try:
-            logger.info(f"Starting workflow execution {execution_id}")
+            logger.info(f"Starting workflow for topics: {topics}, sources: {sources}")
             
-            # Step 1: Collect news
-            logger.info("Step 1: Collecting news...")
-            topics = user_input.get('topics', ['technology'])
-            sources = user_input.get('sources', ['bbc'])
-            max_articles = user_input.get('max_articles', 20)
+            # Execute workflow
+            final_state = await self.workflow.ainvoke(initial_state)
             
+            logger.info(f"Workflow completed successfully. Processed {len(final_state.get('stored_articles', []))} articles")
+            return final_state.get("stored_articles", [])
+            
+        except Exception as e:
+            logger.error(f"Workflow execution failed: {e}")
+            raise
+    
+    async def _topic_selection_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Node for topic selection and validation"""
+        try:
+            if state.get("progress_callback"):
+                state["progress_callback"]("🎯 Validating topics and sources...", 10)
+            
+            state["current_step"] = "topic_selection"
+            state["progress"] = 10
+            
+            # Validate topics and sources
+            valid_topics = []
+            for topic in state["topics"]:
+                if isinstance(topic, str) and topic.strip():
+                    valid_topics.append(topic.strip().lower())
+            
+            valid_sources = []
+            for source in state["sources"]:
+                if isinstance(source, str) and source.strip():
+                    valid_sources.append(source.strip().lower())
+            
+            if not valid_topics:
+                valid_topics = ["technology"]  # Default topic
+            
+            if not valid_sources:
+                valid_sources = ["bbc"]  # Default source
+            
+            state["topics"] = valid_topics
+            state["sources"] = valid_sources
+            
+            logger.info(f"Topic selection complete: {valid_topics} from {valid_sources}")
+            return state
+            
+        except Exception as e:
+            error_msg = f"Topic selection error: {str(e)}"
+            state["errors"].append(error_msg)
+            logger.error(error_msg)
+            return state
+    
+    async def _news_collection_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Node for news collection from multiple sources"""
+        try:
+            if state.get("progress_callback"):
+                state["progress_callback"]("📰 Collecting news articles...", 30)
+            
+            state["current_step"] = "news_collection"
+            state["progress"] = 30
+            
+            # Collect articles using news collector agent
             articles = await self.news_collector.collect_news(
-                topics=topics,
-                sources=sources,
-                max_articles=max_articles,
-                filter_type='latest'
+                topics=state["topics"],
+                sources=state["sources"],
+                max_articles=state["max_articles"]
             )
             
-            if not articles:
-                return {
-                    'success': False,
-                    'error': 'No articles collected',
-                    'execution_id': execution_id
-                }
+            state["collected_articles"] = articles
             
             logger.info(f"Collected {len(articles)} articles")
-            
-            # Step 2: Analyze sentiment
-            logger.info("Step 2: Analyzing sentiment...")
-            sentiment_results = {}
-            for article in articles:
-                try:
-                    title = str(article.get('title', '') or '')
-                    content = str(article.get('content', '') or '')
-                    text = f"{title} {content}"
-                    
-                    sentiment = await self.sentiment_analyzer.analyze(text)
-                    sentiment_results[article['id']] = {
-                        'sentiment': sentiment
-                    }
-                except Exception as e:
-                    logger.error(f"Error analyzing sentiment for article {article['id']}: {e}")
-                    sentiment_results[article['id']] = {
-                        'sentiment': {'label': 'neutral', 'score': 0.0}
-                    }
-            
-            # Step 3: Detect bias
-            logger.info("Step 3: Detecting bias...")
-            bias_results = {}
-            for article in articles:
-                try:
-                    title = str(article.get('title', '') or '')
-                    content = str(article.get('content', '') or '')
-                    text = f"{title} {content}"
-                    source = str(article.get('source', '') or '')
-                    
-                    bias_analysis = await self.bias_detector.analyze_bias(text, source)
-                    bias_results[article['id']] = {
-                        'bias_score': bias_analysis.get('overall_bias_score', 0),
-                        'bias_details': bias_analysis
-                    }
-                except Exception as e:
-                    logger.error(f"Error detecting bias for article {article['id']}: {e}")
-                    bias_results[article['id']] = {
-                        'bias_score': 0.5,
-                        'bias_details': {}
-                    }
-            
-            # Step 4: Fact check (limited to first 3 articles)
-            logger.info("Step 4: Fact checking...")
-            fact_check_results = {}
-            for article in articles[:3]:  # Limit to first 3 articles
-                try:
-                    title = article.get('title', '') or ''
-                    content = article.get('content', '') or ''
-                    text = f"{title} {content}"
-                    
-                    fact_check = await self.fact_checker.check_article(text, article.get('url'))
-                    fact_check_results[article['id']] = {
-                        'credibility_score': fact_check.get('credibility_score', 0.5),
-                        'fact_check_details': fact_check
-                    }
-                except Exception as e:
-                    logger.error(f"Error fact-checking article {article['id']}: {e}")
-                    fact_check_results[article['id']] = {
-                        'credibility_score': 0.5,
-                        'fact_check_details': {}
-                    }
-            
-            # Step 5: Store results
-            logger.info("Step 5: Storing results...")
-            stored_count = 0
-            analysis_results = {}
-            
-            for article in articles:
-                try:
-                    # Combine all analysis results
-                    article_analysis = {}
-                    if article['id'] in sentiment_results:
-                        article_analysis.update(sentiment_results[article['id']])
-                    if article['id'] in bias_results:
-                        article_analysis.update(bias_results[article['id']])
-                    if article['id'] in fact_check_results:
-                        article_analysis.update(fact_check_results[article['id']])
-                    
-                    analysis_results[article['id']] = article_analysis
-                    
-                    # Store in database
-                    article_data = {
-                        'id': article['id'],
-                        'title': article.get('title', ''),
-                        'content': article.get('content', ''),
-                        'source': article.get('source', ''),
-                        'url': article.get('url', ''),
-                        'published_at': article.get('published_at', ''),
-                        'analysis': article_analysis
-                    }
-                    
-                    self.database.add_article(article_data, article_analysis)
-                    stored_count += 1
-                    
-                except Exception as e:
-                    logger.error(f"Error storing article {article['id']}: {e}")
-            
-            # Calculate execution time
-            end_time = datetime.now()
-            duration = (end_time - start_time).total_seconds()
-            
-            # Update performance metrics
-            self.performance_metrics['total_executions'] += 1
-            self.performance_metrics['successful_executions'] += 1
-            self.performance_metrics['avg_processing_time'] = (
-                (self.performance_metrics['avg_processing_time'] * (self.performance_metrics['total_executions'] - 1) + duration) /
-                self.performance_metrics['total_executions']
-            )
-            self.performance_metrics['articles_processed'] += len(articles)
-            
-            # Log execution
-            execution_log = {
-                'id': execution_id,
-                'timestamp': start_time.isoformat(),
-                'duration': duration,
-                'status': 'success',
-                'articles_processed': len(articles),
-                'errors': [],
-                'metrics': {
-                    'articles_collected': len(articles),
-                    'sentiment_analyzed': len(sentiment_results),
-                    'bias_analyzed': len(bias_results),
-                    'fact_checked': len(fact_check_results),
-                    'stored': stored_count
-                }
-            }
-            
-            self.execution_logs.append(execution_log)
-            
-            # Return results
-            return {
-                'success': True,
-                'articles': articles,
-                'analysis_results': analysis_results,
-                'workflow_summary': execution_log['metrics'],
-                'execution_id': execution_id,
-                'duration': duration,
-                'errors': []
-            }
+            return state
             
         except Exception as e:
-            error_msg = f"Workflow execution failed: {str(e)}"
+            error_msg = f"News collection error: {str(e)}"
+            state["errors"].append(error_msg)
             logger.error(error_msg)
+            return state
+    
+    async def _sentiment_analysis_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Node for sentiment analysis using specialized agent"""
+        try:
+            if state.get("progress_callback"):
+                state["progress_callback"]("� Analyzing sentiment...", 50)
             
-            # Log failed execution
-            execution_log = {
-                'id': execution_id,
-                'timestamp': start_time.isoformat(),
-                'duration': (datetime.now() - start_time).total_seconds(),
-                'status': 'failed',
-                'error': error_msg,
-                'articles_processed': 0
+            state["current_step"] = "sentiment_analysis"
+            state["progress"] = 50
+            
+            articles = state.get("collected_articles", [])
+            analyzed_articles = []
+            
+            total_articles = len(articles)
+            
+            for i, article in enumerate(articles):
+                try:
+                    # Update progress for individual articles
+                    if state.get("progress_callback") and total_articles > 0:
+                        progress = 50 + (15 * i / total_articles)
+                        state["progress_callback"](f"� Analyzing sentiment {i+1}/{total_articles}...", int(progress))
+                    
+                    # Perform sentiment analysis
+                    title_content = f"{article.get('title', '')} {article.get('content', '')}"
+                    sentiment_result = await self.sentiment_analyzer.analyze(title_content)
+                    
+                    # Add sentiment results to article
+                    article_copy = article.copy()
+                    article_copy.update({
+                        'sentiment_label': sentiment_result.get('label', 'neutral'),
+                        'sentiment_score': sentiment_result.get('score', 0.0),
+                        'sentiment_confidence': sentiment_result.get('confidence', 0.0),
+                        'sentiment_intensity': sentiment_result.get('intensity', 0.0),
+                        'sentiment_method': sentiment_result.get('method', 'unknown')
+                    })
+                    
+                    analyzed_articles.append(article_copy)
+                    
+                except Exception as e:
+                    logger.warning(f"Error analyzing sentiment for article {i}: {e}")
+                    # Add article without sentiment analysis
+                    analyzed_articles.append(article)
+                    continue
+            
+            state["sentiment_analyzed_articles"] = analyzed_articles
+            
+            logger.info(f"Sentiment analysis complete for {len(analyzed_articles)} articles")
+            return state
+            
+        except Exception as e:
+            error_msg = f"Sentiment analysis error: {str(e)}"
+            state["errors"].append(error_msg)
+            logger.error(error_msg)
+            return state
+    
+    async def _bias_detection_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Node for bias detection using specialized agent"""
+        try:
+            if state.get("progress_callback"):
+                state["progress_callback"]("⚖️ Detecting bias...", 65)
+            
+            state["current_step"] = "bias_detection"
+            state["progress"] = 65
+            
+            articles = state.get("sentiment_analyzed_articles", [])
+            analyzed_articles = []
+            
+            total_articles = len(articles)
+            
+            for i, article in enumerate(articles):
+                try:
+                    # Update progress for individual articles
+                    if state.get("progress_callback") and total_articles > 0:
+                        progress = 65 + (15 * i / total_articles)
+                        state["progress_callback"](f"⚖️ Detecting bias {i+1}/{total_articles}...", int(progress))
+                    
+                    # Perform bias detection
+                    title_content = f"{article.get('title', '')} {article.get('content', '')}"
+                    bias_result = await self.bias_detector.analyze_bias(title_content, article.get('source'))
+                    
+                    # Add bias results to article
+                    article_copy = article.copy()
+                    article_copy.update({
+                        'bias_score': bias_result.get('overall_bias_score', 0.0),
+                        'bias_breakdown': bias_result.get('bias_breakdown', {}),
+                        'bias_method': bias_result.get('method', 'unknown')
+                    })
+                    
+                    analyzed_articles.append(article_copy)
+                    
+                except Exception as e:
+                    logger.warning(f"Error analyzing bias for article {i}: {e}")
+                    # Add article without bias analysis
+                    analyzed_articles.append(article)
+                    continue
+            
+            state["fully_analyzed_articles"] = analyzed_articles
+            
+            logger.info(f"Bias detection complete for {len(analyzed_articles)} articles")
+            return state
+            
+        except Exception as e:
+            error_msg = f"Bias detection error: {str(e)}"
+            state["errors"].append(error_msg)
+            logger.error(error_msg)
+            return state
+    
+    async def _content_synthesis_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Node for synthesizing and enhancing content analysis"""
+        try:
+            if state.get("progress_callback"):
+                state["progress_callback"]("🔗 Synthesizing analysis...", 80)
+            
+            state["current_step"] = "content_synthesis"
+            state["progress"] = 80
+            
+            articles = state.get("fully_analyzed_articles", [])
+            synthesized_articles = []
+            
+            for article in articles:
+                try:
+                    # Calculate overall article quality score
+                    quality_score = self._calculate_article_quality(article)
+                    
+                    # Generate article summary if not present
+                    if not article.get('summary'):
+                        summary = self._generate_article_summary(article)
+                        article['summary'] = summary
+                    
+                    # Add metadata
+                    article['quality_score'] = quality_score
+                    article['analysis_timestamp'] = datetime.now().isoformat()
+                    
+                    synthesized_articles.append(article)
+                    
+                except Exception as e:
+                    logger.warning(f"Error synthesizing article: {e}")
+                    synthesized_articles.append(article)
+                    continue
+            
+            state["synthesized_articles"] = synthesized_articles
+            
+            logger.info(f"Content synthesis complete for {len(synthesized_articles)} articles")
+            return state
+            
+        except Exception as e:
+            error_msg = f"Content synthesis error: {str(e)}"
+            state["errors"].append(error_msg)
+            logger.error(error_msg)
+            return state
+    
+    async def _vector_storage_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Node for storing articles in vector database"""
+        try:
+            if state.get("progress_callback"):
+                state["progress_callback"]("💾 Storing in vector database...", 90)
+            
+            state["current_step"] = "vector_storage"
+            state["progress"] = 90
+            
+            stored_articles = []
+            articles = state.get("synthesized_articles", [])
+            
+            for article in articles:
+                try:
+                    # Prepare comprehensive analysis data
+                    analysis_data = {
+                        'sentiment': {
+                            'label': article.get('sentiment_label', 'neutral'),
+                            'score': article.get('sentiment_score', 0.0),
+                            'confidence': article.get('sentiment_confidence', 0.0),
+                            'intensity': article.get('sentiment_intensity', 0.0)
+                        },
+                        'bias': {
+                            'overall_score': article.get('bias_score', 0.0),
+                            'breakdown': article.get('bias_breakdown', {})
+                        },
+                        'quality_score': article.get('quality_score', 0.5),
+                        'credibility_score': article.get('credibility_score', 0.5)
+                    }
+                    
+                    # Store in vector database
+                    success = await self.database.store_article(article, analysis_data)
+                    
+                    if success:
+                        stored_articles.append(article)
+                    else:
+                        logger.warning(f"Failed to store article: {article.get('title', 'Unknown')}")
+                
+                except Exception as e:
+                    logger.warning(f"Error storing article: {e}")
+                    continue
+            
+            state["stored_articles"] = stored_articles
+            
+            logger.info(f"Vector storage complete for {len(stored_articles)} articles")
+            return state
+            
+        except Exception as e:
+            error_msg = f"Vector storage error: {str(e)}"
+            state["errors"].append(error_msg)
+            logger.error(error_msg)
+            return state
+    
+    async def _completion_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Final node for workflow completion"""
+        try:
+            if state.get("progress_callback"):
+                state["progress_callback"]("✅ Workflow completed successfully!", 100)
+            
+            state["current_step"] = "completion"
+            state["progress"] = 100
+            
+            # Log final statistics
+            total_collected = len(state.get("collected_articles", []))
+            total_analyzed = len(state.get("analyzed_articles", []))
+            total_stored = len(state.get("stored_articles", []))
+            total_errors = len(state.get("errors", []))
+            
+            logger.info(f"Workflow completion summary:")
+            logger.info(f"  - Collected: {total_collected} articles")
+            logger.info(f"  - Analyzed: {total_analyzed} articles")
+            logger.info(f"  - Stored: {total_stored} articles")
+            logger.info(f"  - Errors: {total_errors}")
+            
+            return state
+            
+        except Exception as e:
+            error_msg = f"Completion error: {str(e)}"
+            state["errors"].append(error_msg)
+            logger.error(error_msg)
+            return state
+    
+    def _calculate_article_quality(self, article: Dict[str, Any]) -> float:
+        """Calculate overall article quality score"""
+        try:
+            quality_factors = {
+                'has_content': 1.0 if article.get('content') else 0.0,
+                'has_source': 1.0 if article.get('source') else 0.0,
+                'has_url': 1.0 if article.get('url') else 0.0,
+                'sentiment_confidence': article.get('sentiment_confidence', 0.0),
+                'low_bias': 1.0 - article.get('bias_score', 0.0),
+                'content_length': min(len(article.get('content', '')) / 500, 1.0)
             }
             
-            self.execution_logs.append(execution_log)
+            # Weighted average
+            weights = {
+                'has_content': 0.3,
+                'has_source': 0.2,
+                'has_url': 0.1,
+                'sentiment_confidence': 0.15,
+                'low_bias': 0.15,
+                'content_length': 0.1
+            }
             
+            quality_score = sum(
+                quality_factors[factor] * weights[factor]
+                for factor in quality_factors
+            )
+            
+            return min(quality_score, 1.0)
+            
+        except Exception as e:
+            logger.error(f"Error calculating quality score: {e}")
+            return 0.5
+    
+    def _generate_article_summary(self, article: Dict[str, Any]) -> str:
+        """Generate article summary from content"""
+        try:
+            content = article.get('content', '')
+            title = article.get('title', '')
+            
+            if not content:
+                return title[:100] + "..." if len(title) > 100 else title
+            
+            # Simple extractive summarization
+            sentences = content.split('.')
+            if len(sentences) <= 2:
+                return content[:200] + "..." if len(content) > 200 else content
+            
+            # Take first sentence and most informative sentences
+            summary_sentences = [sentences[0]]
+            
+            # Add sentences with key information indicators
+            key_indicators = ['according to', 'reported', 'announced', 'revealed', 'confirmed']
+            for sentence in sentences[1:3]:  # Limit to avoid long summaries
+                if any(indicator in sentence.lower() for indicator in key_indicators):
+                    summary_sentences.append(sentence)
+            
+            summary = '. '.join(summary_sentences)
+            return summary[:300] + "..." if len(summary) > 300 else summary
+            
+        except Exception as e:
+            logger.error(f"Error generating summary: {e}")
+            return article.get('title', 'Summary not available')[:100]
+
+class ChatWorkflow:
+    """Workflow for processing chat queries with RAG"""
+    
+    def __init__(self, config, database: VectorDatabase):
+        self.config = config
+        self.database = database
+        self.workflow = self._build_chat_workflow()
+    
+    def _build_chat_workflow(self) -> StateGraph:
+        """Build the chat workflow graph"""
+        
+        workflow = StateGraph(dict)
+        
+        # Add nodes for chat processing
+        workflow.add_node("query_analysis", self._query_analysis_node)
+        workflow.add_node("retrieval", self._retrieval_node)
+        workflow.add_node("response_generation", self._response_generation_node)
+        
+        # Define edges
+        workflow.add_edge("query_analysis", "retrieval")
+        workflow.add_edge("retrieval", "response_generation")
+        workflow.add_edge("response_generation", END)
+        
+        # Set entry point
+        workflow.set_entry_point("query_analysis")
+        
+        return workflow.compile()
+    
+    async def process_query(self, query: str) -> Dict[str, Any]:
+        """Process a chat query using the RAG workflow"""
+        
+        initial_state = {
+            "query": query,
+            "expanded_query": "",
+            "retrieved_articles": [],
+            "response": "",
+            "confidence": 0.0
+        }
+        
+        try:
+            final_state = await self.workflow.ainvoke(initial_state)
+            return final_state
+            
+        except Exception as e:
+            logger.error(f"Chat workflow error: {e}")
             return {
-                'success': False,
-                'error': error_msg,
-                'execution_id': execution_id
+                "query": query,
+                "response": f"Sorry, I encountered an error: {str(e)}",
+                "confidence": 0.0
             }
     
-    async def fact_check_claim(self, claim: str) -> Dict[str, Any]:
-        """Fact-check a specific claim"""
+    async def _query_analysis_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Analyze and expand the user query"""
         try:
-            return await self.fact_checker.check_claim(claim)
-        except Exception as e:
-            logger.error(f"Error fact-checking claim: {e}")
-            return None
-    
-    async def answer_question(self, question: str, chat_history: List[Dict[str, str]] = None) -> Dict[str, Any]:
-        """Answer a question using RAG"""
-        try:
-            return await self.rag_agent.answer_question(question, chat_history)
-        except Exception as e:
-            logger.error(f"Error answering question: {e}")
-            return None
-    
-    def health_check(self) -> bool:
-        """Check if all components are healthy"""
-        try:
-            # Check each agent
-            agents_healthy = all([
-                self.news_collector.health_check(),
-                self.sentiment_analyzer.health_check(),
-                self.bias_detector.health_check(),
-                self.fact_checker.health_check(),
-                self.rag_agent.health_check()
-            ])
+            query = state["query"]
             
-            # Check database
-            database_healthy = self.database.health_check()
+            # Simple query expansion (can be enhanced with NLP models)
+            expanded_query = self._expand_query(query)
+            state["expanded_query"] = expanded_query
             
-            return agents_healthy and database_healthy
+            return state
             
         except Exception as e:
-            logger.error(f"Health check failed: {e}")
-            return False
+            logger.error(f"Query analysis error: {e}")
+            return state
     
-    def get_component_status(self) -> Dict[str, bool]:
-        """Get status of individual components"""
+    async def _retrieval_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Retrieve relevant articles from vector database"""
         try:
-            return {
-                'News Collector': self.news_collector.health_check(),
-                'Sentiment Analyzer': self.sentiment_analyzer.health_check(),
-                'Bias Detector': self.bias_detector.health_check(),
-                'Fact Checker': self.fact_checker.health_check(),
-                'RAG Agent': self.rag_agent.health_check(),
-                'Database': self.database.health_check()
-            }
+            query = state["expanded_query"] or state["query"]
+            
+            # Retrieve articles using semantic search
+            articles = await self.database.semantic_search(
+                query=query,
+                embedding_or_model=None,  # Use ChromaDB's built-in embedding
+                limit=5
+            )
+            
+            state["retrieved_articles"] = articles
+            
+            return state
+            
         except Exception as e:
-            logger.error(f"Error getting component status: {e}")
-            return {}
+            logger.error(f"Retrieval error: {e}")
+            state["retrieved_articles"] = []
+            return state
     
-    def get_performance_metrics(self) -> Dict[str, Any]:
-        """Get workflow performance metrics"""
-        success_rate = (
-            self.performance_metrics['successful_executions'] / 
-            max(self.performance_metrics['total_executions'], 1)
-        )
-        
-        return {
-            'total_executions': self.performance_metrics['total_executions'],
-            'success_rate': success_rate,
-            'avg_processing_time': self.performance_metrics['avg_processing_time'],
-            'articles_per_hour': self._calculate_articles_per_hour(),
-            'memory_usage': self._get_memory_usage()
-        }
+    async def _response_generation_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate response based on retrieved articles"""
+        try:
+            query = state["query"]
+            articles = state["retrieved_articles"]
+            
+            if not articles:
+                response = "I couldn't find any relevant articles in the database. Try collecting some news first!"
+                state["response"] = response
+                state["confidence"] = 0.0
+                return state
+            
+            # Generate response by summarizing relevant articles
+            response = self._generate_summary_response(query, articles)
+            state["response"] = response
+            state["confidence"] = 0.8  # High confidence when we have articles
+            
+            return state
+            
+        except Exception as e:
+            logger.error(f"Response generation error: {e}")
+            state["response"] = f"Error generating response: {str(e)}"
+            state["confidence"] = 0.0
+            return state
     
-    def get_agent_status(self) -> Dict[str, Dict[str, Any]]:
-        """Get detailed status of each agent"""
-        return {
-            'News Collector': {
-                'active': self.news_collector.health_check(),
-                'last_run': getattr(self.news_collector, 'last_run', 'Never'),
-                'error': getattr(self.news_collector, 'last_error', None)
-            },
-            'Sentiment Analyzer': {
-                'active': self.sentiment_analyzer.health_check(),
-                'last_run': getattr(self.sentiment_analyzer, 'last_run', 'Never'),
-                'error': getattr(self.sentiment_analyzer, 'last_error', None)
-            },
-            'Bias Detector': {
-                'active': self.bias_detector.health_check(),
-                'last_run': getattr(self.bias_detector, 'last_run', 'Never'),
-                'error': getattr(self.bias_detector, 'last_error', None)
-            },
-            'Fact Checker': {
-                'active': self.fact_checker.health_check(),
-                'last_run': getattr(self.fact_checker, 'last_run', 'Never'),
-                'error': getattr(self.fact_checker, 'last_error', None)
-            },
-            'RAG Agent': {
-                'active': self.rag_agent.health_check(),
-                'last_run': getattr(self.rag_agent, 'last_run', 'Never'),
-                'error': getattr(self.rag_agent, 'last_error', None)
-            }
-        }
-    
-    def get_execution_logs(self) -> List[Dict[str, Any]]:
-        """Get workflow execution logs"""
-        return self.execution_logs.copy()
-    
-    def restart(self):
-        """Restart the workflow"""
-        logger.info("Restarting workflow...")
-        # Reset metrics and logs
-        self.execution_logs.clear()
-        self.performance_metrics = {
-            'total_executions': 0,
-            'successful_executions': 0,
-            'avg_processing_time': 0.0,
-            'articles_processed': 0
+    def _expand_query(self, query: str) -> str:
+        """Expand query with related terms"""
+        # Simple keyword expansion
+        expansions = {
+            "technology": ["tech", "digital", "AI", "software", "innovation"],
+            "politics": ["political", "government", "election", "policy", "legislation"],
+            "health": ["medical", "healthcare", "medicine", "wellness", "disease"],
+            "business": ["economy", "market", "finance", "corporate", "industry"],
+            "science": ["research", "study", "discovery", "scientific", "experiment"]
         }
         
-        # Restart agents
-        for agent in [self.news_collector, self.sentiment_analyzer, self.bias_detector, 
-                     self.fact_checker, self.rag_agent]:
-            if hasattr(agent, 'restart'):
-                agent.restart()
-    
-    def clear_cache(self):
-        """Clear workflow cache"""
-        logger.info("Clearing workflow cache...")
-        # Clear agent caches
-        for agent in [self.news_collector, self.sentiment_analyzer, self.bias_detector, 
-                     self.fact_checker, self.rag_agent]:
-            if hasattr(agent, 'clear_cache'):
-                agent.clear_cache()
-    
-    def export_logs(self) -> str:
-        """Export execution logs as JSON"""
-        return json.dumps({
-            'execution_logs': self.execution_logs,
-            'performance_metrics': self.performance_metrics,
-            'export_timestamp': datetime.now().isoformat()
-        }, indent=2)
-    
-    def _calculate_articles_per_hour(self) -> int:
-        """Calculate articles processed per hour"""
-        if not self.execution_logs:
-            return 0
+        expanded = query.lower()
+        for topic, terms in expansions.items():
+            if topic in expanded:
+                expanded += " " + " ".join(terms)
         
-        # Calculate based on recent executions
-        recent_logs = self.execution_logs[-10:]  # Last 10 executions
-        total_articles = sum(log.get('articles_processed', 0) for log in recent_logs)
-        total_time_hours = sum(log.get('duration', 0) for log in recent_logs) / 3600
-        
-        if total_time_hours > 0:
-            return int(total_articles / total_time_hours)
-        return 0
+        return expanded
     
-    def _get_memory_usage(self) -> float:
-        """Get approximate memory usage in MB"""
-        try:
-            import psutil
-            import os
+    def _generate_summary_response(self, query: str, articles: List[Dict[str, Any]]) -> str:
+        """Generate a summary response from retrieved articles"""
+        if not articles:
+            return "No relevant articles found."
+        
+        # Extract key information from articles
+        summaries = []
+        for article in articles[:3]:  # Top 3 most relevant
+            title = article.get('title', '')
+            content = article.get('content', '')
+            source = article.get('source', '')
+            sentiment = article.get('sentiment_label', 'neutral')
             
-            process = psutil.Process(os.getpid())
-            memory_info = process.memory_info()
-            return memory_info.rss / 1024 / 1024  # Convert to MB
-        except ImportError:
-            return 0.0  # psutil not available
+            summary = f"**{title}** (Source: {source}, Sentiment: {sentiment})\n"
+            summary += f"{content[:200]}...\n"
+            summaries.append(summary)
+        
+        response = f"Based on the news articles in our database, here's what I found:\n\n"
+        response += "\n".join(summaries)
+        response += f"\n\nI found {len(articles)} relevant articles in total."
+        
+        return response

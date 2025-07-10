@@ -1,10 +1,10 @@
 import os
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
-class Config:
+class AppConfig:
     def __init__(self):
         # API Keys (all free or not required for basic functionality)
         self.api_keys = {
@@ -42,7 +42,7 @@ class Config:
             'sentiment': {
                 'confidence_threshold': 0.7,
                 'batch_size': 10,
-                'model_name': 'cardiffnlp/twitter-roberta-base-sentiment-latest'
+                'model_name': 'cardiffnlp/twitter-roberta-base-sentiment'
             },
             'bias': {
                 'threshold': 0.5,
@@ -217,3 +217,159 @@ class Config:
             'enable_web_scraping': os.getenv('ENABLE_WEB_SCRAPING', 'false').lower() == 'true',
             'enable_caching': self.workflow_settings.get('enable_caching', True)
         }
+    
+    def get_huggingface_key(self) -> Optional[str]:
+        """Get Hugging Face API key from environment or secrets file"""
+        # First check environment variable
+        hf_key = os.getenv('HF_API_KEY')
+        if hf_key:
+            return hf_key
+        
+        # Then check secrets file
+        try:
+            secrets_path = os.path.join(os.getcwd(), 'secrets.env')
+            if os.path.exists(secrets_path):
+                with open(secrets_path, 'r') as f:
+                    for line in f:
+                        if line.strip().startswith('HF_API_KEY='):
+                            return line.strip().split('=', 1)[1].strip()
+        except Exception as e:
+            logger.warning(f"Could not read secrets file: {e}")
+        
+        return None
+    
+    def get_newsapi_key(self) -> Optional[str]:
+        """Get NewsAPI key from environment or secrets file"""
+        # First check environment variable
+        api_key = os.getenv('NEWSAPI_KEY')
+        if api_key:
+            return api_key
+        
+        # Then check secrets file
+        try:
+            secrets_path = os.path.join(os.getcwd(), 'secrets.env')
+            if os.path.exists(secrets_path):
+                with open(secrets_path, 'r') as f:
+                    for line in f:
+                        if line.strip().startswith('NEWSAPI_KEY='):
+                            return line.strip().split('=', 1)[1].strip()
+        except Exception as e:
+            logger.warning(f"Could not read secrets file: {e}")
+        
+        return None
+    
+    def get_huggingface_models(self) -> Dict[str, str]:
+        """Get Hugging Face model configurations"""
+        return {
+            'sentiment': 'cardiffnlp/twitter-roberta-base-sentiment-latest',
+            'bias': 'martin-ha/toxic-comment-model',
+            'embedding': 'sentence-transformers/all-MiniLM-L6-v2',
+            'summarization': 'facebook/bart-large-cnn',
+            'classification': 'cardiffnlp/twitter-roberta-base-sentiment-latest',
+            'text_generation': 'gpt2',
+            'qa': 'deepset/roberta-base-squad2'
+        }
+    
+    def get_api_endpoints(self) -> Dict[str, str]:
+        """Get API endpoint configurations"""
+        return {
+            'huggingface_inference': 'https://api-inference.huggingface.co/models',
+            'newsapi': 'https://newsapi.org/v2',
+            'google_factcheck': 'https://factchecktools.googleapis.com/v1alpha1',
+            'reddit': 'https://www.reddit.com',
+            'hackernews': 'https://hacker-news.firebaseio.com/v0'
+        }
+    
+    def get_embedding_config(self) -> Dict[str, Any]:
+        """Get embedding configuration for ChromaDB"""
+        return {
+            'model_name': 'sentence-transformers/all-MiniLM-L6-v2',
+            'dimension': 384,
+            'distance_metric': 'cosine',
+            'batch_size': 32,
+            'normalize_embeddings': True
+        }
+    
+    def get_chat_config(self) -> Dict[str, Any]:
+        """Get chat agent configuration"""
+        return {
+            'max_context_length': 4000,
+            'max_retrieved_articles': 5,
+            'similarity_threshold': 0.7,
+            'response_max_length': 500,
+            'temperature': 0.7
+        }
+    
+    def get_workflow_config(self) -> Dict[str, Any]:
+        """Get workflow configuration for LangGraph"""
+        return {
+            'max_concurrent_tasks': 3,
+            'timeout_seconds': 300,
+            'retry_attempts': 2,
+            'enable_caching': True,
+            'log_level': 'INFO'
+        }
+    
+    def get_langgraph_settings(self) -> Dict[str, Any]:
+        """Get LangGraph workflow configuration"""
+        return {
+            'agent_executor_config': {
+                'max_iterations': 10,
+                'verbose': self.is_development_mode(),
+                'early_stopping_method': 'force',
+                'handle_parsing_errors': True
+            },
+            'workflow_config': {
+                'topic_selection': {
+                    'enabled': True,
+                    'timeout_seconds': 10
+                },
+                'news_collection': {
+                    'enabled': True,
+                    'timeout_seconds': 30,
+                    'max_articles': 20
+                },
+                'content_analysis': {
+                    'enabled': True,
+                    'timeout_seconds': 30,
+                    'batch_size': 5
+                },
+                'fact_checking': {
+                    'enabled': True,
+                    'timeout_seconds': 30,
+                    'sources_to_check': 3
+                },
+                'chat': {
+                    'enabled': True,
+                    'timeout_seconds': 20,
+                    'max_context': 4000
+                }
+            }
+        }
+    
+    def get(self, key: str, default: Any = None) -> Any:
+        """Generic get method for backwards compatibility"""
+        # Try to map common keys to proper methods
+        key_mappings = {
+            'huggingface_api_key': lambda: self.get_huggingface_key(),
+            'newsapi_key': lambda: self.get_newsapi_key(),
+            'huggingface_api_url': lambda: self.get_huggingface_models().get('text_generation', ''),
+            'embedding_api_url': lambda: self.get_embedding_config().get('api_url', ''),
+            'max_sources': lambda: self.get_chat_config().get('max_sources', 5),
+            'context_window': lambda: self.get_chat_config().get('context_window', 4000)
+        }
+        
+        if key in key_mappings:
+            result = key_mappings[key]()
+            return result if result is not None else default
+        
+        # Fall back to checking all settings dictionaries
+        for settings_dict in [
+            self.api_keys, self.api_endpoints, self.rate_limits,
+            self.analysis_settings, self.database_settings,
+            self.news_settings, self.workflow_settings
+        ]:
+            if isinstance(settings_dict, dict) and key in settings_dict:
+                return settings_dict[key]
+        
+        return default

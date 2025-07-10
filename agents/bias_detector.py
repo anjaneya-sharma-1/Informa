@@ -2,396 +2,233 @@ import asyncio
 import logging
 from typing import Dict, Any, List
 from datetime import datetime
-import re
-
-from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
-import torch
+import requests
+import os
 
 logger = logging.getLogger(__name__)
 
 class BiasDetectorAgent:
-    def __init__(self):
+    def __init__(self, config=None):
+        self.config = config
         self.last_run = None
         self.last_error = None
         
-        # Try to initialize Hugging Face model for bias detection
-        try:
-            # Use a model trained for bias detection or classification
-            # Note: This is a placeholder - you might want to use a specific bias detection model
-            model_name = "unitary/toxic-bert"
-            
-            self.bias_pipeline = pipeline(
-                "text-classification",
-                model=model_name,
-                device=0 if torch.cuda.is_available() else -1,
-                return_all_scores=True
-            )
-            
-            logger.info("Bias detector initialized with Hugging Face model")
-            
-        except Exception as e:
-            logger.warning(f"Could not initialize HF bias model, using rule-based approach: {e}")
-            self.bias_pipeline = None
+        # Get API configuration dynamically
+        if config:
+            self.api_key = config.get_huggingface_key()
+            models = config.get_huggingface_models()
+            self.api_url = f"https://api-inference.huggingface.co/models/{models['bias']}"
+        else:
+            # Fallback to environment/secrets file
+            self.api_key = self._load_api_key_from_secrets()
+            self.api_url = "https://api-inference.huggingface.co/models/unitary/toxic-bert"
         
-        # Rule-based bias indicators
-        self.bias_indicators = {
-            'political_left': {
-                'keywords': ['progressive', 'liberal', 'social justice', 'equality', 'diversity', 
-                           'systemic', 'marginalized', 'oppressed', 'activist', 'reform'],
-                'phrases': ['fight for justice', 'systemic inequality', 'progressive values', 
-                          'social change', 'human rights'],
-                'patterns': [r'(fight|battle) (for|against)', r'systemic (racism|inequality|oppression)']
-            },
-            'political_right': {
-                'keywords': ['conservative', 'traditional', 'patriotic', 'freedom', 'liberty',
-                           'constitutional', 'family values', 'law and order', 'security', 'defense'],
-                'phrases': ['traditional values', 'personal responsibility', 'free market',
-                          'constitutional rights', 'law and order'],
-                'patterns': [r'traditional (values|family)', r'personal (responsibility|freedom)']
-            },
-            'sensationalism': {
-                'keywords': ['shocking', 'unbelievable', 'incredible', 'amazing', 'devastating',
-                           'explosive', 'bombshell', 'stunning', 'outrageous', 'unprecedented'],
-                'phrases': ['you won\'t believe', 'shocking truth', 'incredible discovery',
-                          'breaking news', 'exclusive report'],
-                'patterns': [r'[A-Z]{3,}', r'!!!+', r'\?{2,}', r'BREAKING:', r'EXCLUSIVE:']
-            },
-            'emotional_manipulation': {
-                'keywords': ['outrageous', 'disgusting', 'heartbreaking', 'terrifying', 'infuriating',
-                           'devastating', 'horrific', 'appalling', 'shocking', 'disturbing'],
-                'phrases': ['makes you sick', 'will shock you', 'absolutely disgusting',
-                          'heart-wrenching', 'blood-boiling'],
-                'patterns': [r'(very|extremely|absolutely|completely)\s+(shocking|disgusting|outrageous)']
-            },
-            'confirmation_bias': {
-                'keywords': ['obviously', 'clearly', 'undoubtedly', 'everyone knows', 'common sense',
-                           'of course', 'naturally', 'certainly', 'definitely', 'surely'],
-                'phrases': ['it\'s obvious that', 'everyone agrees', 'common knowledge',
-                          'goes without saying', 'stands to reason'],
-                'patterns': [r'(obviously|clearly|undoubtedly)', r'everyone (knows|agrees|thinks)']
-            },
-            'loaded_language': {
-                'keywords': ['radical', 'extremist', 'fanatic', 'terrorist', 'hero', 'villain',
-                           'monster', 'saint', 'evil', 'pure', 'corrupt', 'innocent'],
-                'phrases': ['radical agenda', 'extremist views', 'dangerous ideology',
-                          'corrupt system', 'pure evil'],
-                'patterns': [r'(so-called|alleged)', r'(radical|extreme|dangerous)\s+(left|right|agenda)']
-            },
-            'false_balance': {
-                'keywords': ['both sides', 'balanced view', 'fair and balanced', 'some say',
-                           'critics argue', 'supporters claim', 'opponents believe'],
-                'phrases': ['on the other hand', 'some say', 'critics argue',
-                          'both sides of the story', 'fair and balanced'],
-                'patterns': [r'some (people|experts|critics) (say|argue|believe)',
-                           r'(supporters|opponents) (claim|argue|believe)']
-            }
-        }
-        
-        # Source reliability database
-        self.source_reliability = {
-            'high': ['reuters', 'ap news', 'bbc', 'npr', 'pbs', 'associated press'],
-            'medium': ['cnn', 'fox news', 'msnbc', 'washington post', 'new york times', 
-                      'wall street journal', 'usa today'],
-            'low': ['infowars', 'breitbart', 'occupy democrats', 'natural news', 
-                   'daily mail', 'buzzfeed news'],
-            'social': ['reddit', 'twitter', 'facebook', 'hackernews']
-        }
+        if not self.api_key:
+            logger.warning("No Hugging Face API key found. Bias detection will use fallback methods.")
     
-    async def analyze_bias(self, text: str, source: str = None) -> Dict[str, Any]:
-        """Comprehensive bias analysis using multiple methods"""
+    def _load_api_key_from_secrets(self) -> str:
+        """Load API key from secrets file"""
         try:
-            self.last_run = datetime.now().isoformat()
-            
-            if not text or not text.strip():
-                return {
-                    'overall_bias_score': 0.0,
-                    'bias_breakdown': {},
-                    'method': 'empty_text'
-                }
-            
-            # Clean text
-            cleaned_text = self._preprocess_text(text)
-            
-            # Rule-based analysis
-            rule_based_result = await self._rule_based_analysis(cleaned_text, source)
-            
-            # Try Hugging Face analysis if available
-            if self.bias_pipeline:
-                try:
-                    hf_result = await self._huggingface_bias_analysis(cleaned_text)
-                    # Combine results
-                    combined_result = self._combine_bias_results(rule_based_result, hf_result)
-                    return combined_result
-                except Exception as e:
-                    logger.warning(f"HF bias analysis failed, using rule-based: {e}")
-            
-            return rule_based_result
-            
+            with open('secrets.env', 'r') as f:
+                for line in f:
+                    if line.strip().startswith('HF_API_KEY='):
+                        return line.strip().split('=', 1)[1].strip()
         except Exception as e:
-            self.last_error = str(e)
-            logger.error(f"Error in bias analysis: {e}")
+            logger.warning(f"Could not load Hugging Face API key from secrets: {e}")
+        return None
+    async def analyze_bias(self, text: str, source: str = None) -> Dict[str, Any]:
+        """Bias analysis using Hugging Face Inference API with multiple bias detection approaches."""
+        self.last_run = datetime.now().isoformat()
+        
+        if not text or not text.strip():
             return {
                 'overall_bias_score': 0.0,
-                'error': str(e)
+                'bias_breakdown': {},
+                'method': 'empty_text'
             }
+        
+        cleaned_text = self._preprocess_text(text)
+        
+        if self.api_key:
+            try:
+                # Use multiple bias detection approaches
+                results = await self._comprehensive_bias_analysis(cleaned_text, source)
+                return results
+            except Exception as e:
+                logger.warning(f"Hugging Face API call failed: {e}")
+                return self._fallback_bias_analysis(cleaned_text, source)
+        else:
+            return self._fallback_bias_analysis(cleaned_text, source)
     
+    async def _comprehensive_bias_analysis(self, text: str, source: str = None) -> Dict[str, Any]:
+        """Comprehensive bias analysis using multiple Hugging Face models"""
+        results = {}
+        
+        # 1. Toxicity detection
+        toxicity_result = self._huggingface_api_bias(text)
+        results['toxicity'] = self._parse_toxicity_result(toxicity_result)
+        
+        # 2. Political bias indicators (using sentiment as proxy)
+        political_bias = self._detect_political_bias_keywords(text)
+        results['political_bias'] = political_bias
+        
+        # 3. Emotional manipulation detection
+        emotional_bias = self._detect_emotional_manipulation(text)
+        results['emotional_bias'] = emotional_bias
+        
+        # 4. Source credibility factor
+        source_factor = self._get_source_credibility_factor(source)
+        results['source_credibility'] = source_factor
+        
+        # Calculate overall bias score
+        overall_score = self._calculate_overall_bias_score(results)
+        
+        return {
+            'overall_bias_score': overall_score,
+            'bias_breakdown': results,
+            'method': 'comprehensive_huggingface_api',
+            'analyzed_at': self.last_run
+        }
+    
+    def _fallback_bias_analysis(self, text: str, source: str = None) -> Dict[str, Any]:
+        """Fallback bias analysis using keyword-based detection"""
+        bias_indicators = self._detect_bias_keywords(text)
+        source_factor = self._get_source_credibility_factor(source)
+        
+        # Simple scoring based on keyword presence
+        keyword_score = min(len(bias_indicators) * 0.2, 1.0)
+        overall_score = (keyword_score + (1.0 - source_factor)) / 2
+        
+        return {
+            'overall_bias_score': overall_score,
+            'bias_breakdown': {
+                'bias_keywords': bias_indicators,
+                'source_credibility': source_factor
+            },
+            'method': 'keyword_fallback',
+            'analyzed_at': self.last_run
+        }
+
+    def _huggingface_api_bias(self, text: str):
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        response = requests.post(self.api_url, headers=headers, json={"inputs": text})
+        response.raise_for_status()
+        return response.json()
+
     def _preprocess_text(self, text: str) -> str:
-        """Preprocess text for bias analysis"""
-        # Preserve case for pattern matching
-        text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\$$\$$,]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '', text)
+        import re
+        text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*$\$,]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '', text)
         text = ' '.join(text.split())
         return text
     
-    async def _rule_based_analysis(self, text: str, source: str = None) -> Dict[str, Any]:
-        """Rule-based bias detection"""
-        try:
-            bias_scores = {}
-            detected_patterns = []
-            
-            # Analyze each bias type
-            for bias_type, indicators in self.bias_indicators.items():
-                score = self._calculate_bias_score(text, indicators)
-                bias_scores[bias_type] = score
-                
-                if score > 0.3:  # Significant bias detected
-                    patterns = self._find_bias_patterns(text, indicators)
-                    if patterns:
-                        detected_patterns.extend([
-                            {'type': bias_type, 'pattern': pattern, 'score': score}
-                            for pattern in patterns[:3]  # Limit patterns
-                        ])
-            
-            # Source-based bias adjustment
-            source_bias = self._analyze_source_bias(source)
-            
-            # Calculate overall bias score
-            content_bias = max(bias_scores.values()) if bias_scores else 0.0
-            overall_bias = min(1.0, (content_bias * 0.8) + (source_bias * 0.2))
-            
-            # Generate recommendations
-            recommendations = self._generate_bias_recommendations(bias_scores, detected_patterns)
-            
-            return {
-                'overall_bias_score': overall_bias,
-                'bias_breakdown': bias_scores,
-                'detected_patterns': detected_patterns,
-                'source_bias': source_bias,
-                'recommendations': recommendations,
-                'method': 'rule_based',
-                'confidence': self._calculate_confidence(bias_scores, detected_patterns)
-            }
-            
-        except Exception as e:
-            logger.error(f"Rule-based analysis error: {e}")
-            return {'overall_bias_score': 0.0, 'error': str(e)}
+    def _parse_toxicity_result(self, result) -> Dict[str, float]:
+        """Parse toxicity detection result from Hugging Face API"""
+        if isinstance(result, list) and len(result) > 0 and isinstance(result[0], list):
+            scores = {}
+            for label_data in result[0]:
+                label = label_data.get('label', '').lower()
+                score = label_data.get('score', 0.0)
+                scores[label] = score
+            return scores
+        return {'toxic': 0.0}
     
-    async def _huggingface_bias_analysis(self, text: str) -> Dict[str, Any]:
-        """Bias analysis using Hugging Face model"""
-        try:
-            # Truncate text if too long
-            if len(text) > 400:
-                text = text[:400] + "..."
-            
-            # Run inference
-            results = self.bias_pipeline(text)
-            
-            if results and len(results) > 0:
-                # Process results - this depends on the specific model used
-                # For toxic-bert, we get toxicity scores
-                toxic_score = 0.0
-                
-                for result in results[0]:
-                    if result['label'] == 'TOXIC':
-                        toxic_score = result['score']
-                        break
-                
-                return {
-                    'hf_bias_score': toxic_score,
-                    'method': 'huggingface',
-                    'raw_results': results[0]
-                }
-            else:
-                raise ValueError("No results from HF model")
-                
-        except Exception as e:
-            logger.error(f"HF bias analysis error: {e}")
-            raise
-    
-    def _combine_bias_results(self, rule_result: Dict[str, Any], hf_result: Dict[str, Any]) -> Dict[str, Any]:
-        """Combine rule-based and HF bias analysis results"""
-        try:
-            # Weight the results
-            rule_weight = 0.7
-            hf_weight = 0.3
-            
-            # Combine overall scores
-            rule_score = rule_result.get('overall_bias_score', 0.0)
-            hf_score = hf_result.get('hf_bias_score', 0.0)
-            
-            combined_score = (rule_score * rule_weight) + (hf_score * hf_weight)
-            
-            # Update the rule result with combined information
-            rule_result['overall_bias_score'] = combined_score
-            rule_result['method'] = 'combined'
-            rule_result['hf_analysis'] = hf_result
-            
-            return rule_result
-            
-        except Exception as e:
-            logger.error(f"Error combining bias results: {e}")
-            return rule_result
-    
-    def _calculate_bias_score(self, text: str, indicators: Dict[str, List[str]]) -> float:
-        """Calculate bias score for specific indicators"""
+    def _detect_political_bias_keywords(self, text: str) -> Dict[str, Any]:
+        """Detect political bias indicators in text"""
+        left_keywords = ['progressive', 'liberal', 'social justice', 'equality', 'diversity', 'climate change']
+        right_keywords = ['conservative', 'traditional', 'law and order', 'national security', 'free market']
+        center_keywords = ['moderate', 'bipartisan', 'compromise', 'balanced']
+        
         text_lower = text.lower()
-        total_score = 0.0
-        max_possible_score = 0.0
         
-        # Check keywords
-        if 'keywords' in indicators:
-            keyword_matches = sum(1 for keyword in indicators['keywords'] if keyword in text_lower)
-            keyword_score = min(1.0, keyword_matches / max(len(indicators['keywords']), 1))
-            total_score += keyword_score * 0.4
-            max_possible_score += 0.4
+        left_count = sum(1 for word in left_keywords if word in text_lower)
+        right_count = sum(1 for word in right_keywords if word in text_lower)
+        center_count = sum(1 for word in center_keywords if word in text_lower)
         
-        # Check phrases
-        if 'phrases' in indicators:
-            phrase_matches = sum(1 for phrase in indicators['phrases'] if phrase in text_lower)
-            phrase_score = min(1.0, phrase_matches / max(len(indicators['phrases']), 1))
-            total_score += phrase_score * 0.4
-            max_possible_score += 0.4
+        total_political = left_count + right_count + center_count
         
-        # Check patterns
-        if 'patterns' in indicators:
-            pattern_matches = 0
-            for pattern in indicators['patterns']:
-                matches = len(re.findall(pattern, text, re.IGNORECASE))
-                pattern_matches += matches
-            
-            pattern_score = min(1.0, pattern_matches / max(len(indicators['patterns']), 1))
-            total_score += pattern_score * 0.2
-            max_possible_score += 0.2
+        if total_political == 0:
+            return {'lean': 'neutral', 'strength': 0.0}
         
-        return total_score / max_possible_score if max_possible_score > 0 else 0.0
+        if left_count > right_count and left_count > center_count:
+            return {'lean': 'left', 'strength': left_count / max(total_political, 1)}
+        elif right_count > left_count and right_count > center_count:
+            return {'lean': 'right', 'strength': right_count / max(total_political, 1)}
+        else:
+            return {'lean': 'center', 'strength': center_count / max(total_political, 1)}
     
-    def _find_bias_patterns(self, text: str, indicators: Dict[str, List[str]]) -> List[str]:
-        """Find specific bias patterns in text"""
-        found_patterns = []
+    def _detect_emotional_manipulation(self, text: str) -> Dict[str, Any]:
+        """Detect emotional manipulation indicators"""
+        emotion_keywords = {
+            'fear': ['terrifying', 'shocking', 'alarming', 'devastating', 'crisis', 'emergency'],
+            'anger': ['outrageous', 'disgusting', 'infuriating', 'scandal', 'betrayal'],
+            'excitement': ['amazing', 'incredible', 'revolutionary', 'breakthrough', 'miracle'],
+            'urgency': ['urgent', 'immediate', 'now', 'quickly', 'limited time']
+        }
         
-        # Find keyword matches
-        if 'keywords' in indicators:
-            for keyword in indicators['keywords']:
-                if keyword in text.lower():
-                    # Find context
-                    start_idx = text.lower().find(keyword)
-                    if start_idx != -1:
-                        context_start = max(0, start_idx - 20)
-                        context_end = min(len(text), start_idx + len(keyword) + 20)
-                        context = text[context_start:context_end].strip()
-                        found_patterns.append(f"Keyword '{keyword}': ...{context}...")
+        text_lower = text.lower()
+        emotion_scores = {}
         
-        # Find phrase matches
-        if 'phrases' in indicators:
-            for phrase in indicators['phrases']:
-                if phrase in text.lower():
-                    start_idx = text.lower().find(phrase)
-                    if start_idx != -1:
-                        context_start = max(0, start_idx - 15)
-                        context_end = min(len(text), start_idx + len(phrase) + 15)
-                        context = text[context_start:context_end].strip()
-                        found_patterns.append(f"Phrase '{phrase}': ...{context}...")
+        for emotion, keywords in emotion_keywords.items():
+            count = sum(1 for word in keywords if word in text_lower)
+            emotion_scores[emotion] = count
         
-        return found_patterns[:5]  # Limit to top 5
+        total_emotional = sum(emotion_scores.values())
+        manipulation_score = min(total_emotional * 0.1, 1.0)
+        
+        return {
+            'manipulation_score': manipulation_score,
+            'emotion_breakdown': emotion_scores
+        }
     
-    def _analyze_source_bias(self, source: str) -> float:
-        """Analyze bias based on news source"""
+    def _get_source_credibility_factor(self, source: str) -> float:
+        """Get source credibility factor (higher = more credible)"""
         if not source:
-            return 0.0
+            return 0.5  # Unknown source
         
-        source_lower = source.lower()
+        source = source.lower()
         
-        # Check against known source reliability
-        for reliability_level, sources in self.source_reliability.items():
-            if any(known_source in source_lower for known_source in sources):
-                bias_score = {
-                    'high': 0.1,      # High reliability = low bias
-                    'medium': 0.3,    # Medium reliability = moderate bias
-                    'low': 0.8,       # Low reliability = high bias
-                    'social': 0.5     # Social media = moderate bias
-                }.get(reliability_level, 0.5)
-                
-                return bias_score
+        # High credibility sources
+        high_credibility = ['reuters', 'ap', 'bbc', 'npr', 'pbs', 'bloomberg']
+        if any(cred in source for cred in high_credibility):
+            return 0.9
         
-        # Unknown source - moderate bias assumption
-        return 0.5
+        # Medium credibility sources
+        medium_credibility = ['cnn', 'fox', 'nbc', 'abc', 'cbs', 'washington post', 'wall street journal']
+        if any(cred in source for cred in medium_credibility):
+            return 0.7
+        
+        # Lower credibility indicators
+        low_credibility = ['blog', 'opinion', 'editorial', 'social media']
+        if any(low in source for low in low_credibility):
+            return 0.3
+        
+        return 0.5  # Default
     
-    def _generate_bias_recommendations(self, bias_breakdown: Dict[str, float], 
-                                     detected_patterns: List[Dict[str, Any]]) -> List[str]:
-        """Generate recommendations for reducing bias"""
-        recommendations = []
+    def _detect_bias_keywords(self, text: str) -> List[str]:
+        """Detect bias keywords for fallback analysis"""
+        bias_keywords = [
+            'allegedly', 'claims', 'supposedly', 'reportedly', 'sources say',
+            'insiders reveal', 'shocking truth', 'exposed', 'cover-up',
+            'conspiracy', 'mainstream media', 'fake news', 'propaganda'
+        ]
         
-        # Check for high bias scores
-        high_bias_types = [bias_type for bias_type, score in bias_breakdown.items() if score > 0.6]
-        
-        if 'sensationalism' in high_bias_types:
-            recommendations.append("Consider using more neutral language and avoiding sensationalized terms.")
-        
-        if 'emotional_manipulation' in high_bias_types:
-            recommendations.append("Focus on facts rather than emotional appeals to maintain objectivity.")
-        
-        if 'political_left' in high_bias_types or 'political_right' in high_bias_types:
-            recommendations.append("Present multiple perspectives to provide balanced coverage.")
-        
-        if 'loaded_language' in high_bias_types:
-            recommendations.append("Use neutral terminology instead of loaded or charged language.")
-        
-        if 'confirmation_bias' in high_bias_types:
-            recommendations.append("Include evidence that challenges the main narrative for balance.")
-        
-        if 'false_balance' in high_bias_types:
-            recommendations.append("Ensure different viewpoints are given appropriate weight based on evidence.")
-        
-        # General recommendations
-        if max(bias_breakdown.values()) > 0.5:
-            recommendations.append("Consider fact-checking claims and citing credible sources.")
-            recommendations.append("Review the article for subjective language and replace with objective reporting.")
-        
-        return recommendations[:5]  # Limit to top 5
+        text_lower = text.lower()
+        found_keywords = [keyword for keyword in bias_keywords if keyword in text_lower]
+        return found_keywords
     
-    def _calculate_confidence(self, bias_breakdown: Dict[str, float], 
-                            detected_patterns: List[Dict[str, Any]]) -> float:
-        """Calculate confidence in bias detection"""
-        # Higher confidence when multiple bias types are detected
-        significant_biases = sum(1 for score in bias_breakdown.values() if score > 0.3)
-        pattern_count = len(detected_patterns)
+    def _calculate_overall_bias_score(self, results: Dict[str, Any]) -> float:
+        """Calculate overall bias score from multiple factors"""
+        toxicity_score = results.get('toxicity', {}).get('toxic', 0.0)
+        political_strength = results.get('political_bias', {}).get('strength', 0.0)
+        emotional_score = results.get('emotional_bias', {}).get('manipulation_score', 0.0)
+        source_credibility = results.get('source_credibility', 0.5)
         
-        # Base confidence on number of detected patterns and bias types
-        confidence = min(1.0, (significant_biases * 0.2) + (pattern_count * 0.1) + 0.5)
+        # Weighted combination
+        bias_score = (
+            toxicity_score * 0.3 +
+            political_strength * 0.2 +
+            emotional_score * 0.3 +
+            (1.0 - source_credibility) * 0.2
+        )
         
-        return confidence
-    
-    def health_check(self) -> bool:
-        """Check if the bias detector is healthy"""
-        try:
-            # Test with simple text
-            test_text = "This is a neutral test statement"
-            
-            # Test rule-based analysis
-            result = asyncio.run(self._rule_based_analysis(test_text))
-            return result.get('overall_bias_score') is not None
-            
-        except Exception as e:
-            self.last_error = str(e)
-            logger.error(f"Bias detector health check failed: {e}")
-            return False
-    
-    def clear_cache(self):
-        """Clear any cached data"""
-        self.last_error = None
-        logger.info("Bias detector cache cleared")
-    
-    def restart(self):
-        """Restart the bias detector"""
-        self.clear_cache()
-        self.last_run = None
-        logger.info("Bias detector restarted")
+        return min(bias_score, 1.0)

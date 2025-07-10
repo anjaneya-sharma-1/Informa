@@ -3,72 +3,50 @@ import logging
 from typing import Dict, Any, List
 from datetime import datetime
 import re
-
-from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
-import torch
-
-import streamlit as st
+import requests
+import os
 
 logger = logging.getLogger(__name__)
 
 class SentimentAnalyzerAgent:
-    def __init__(self):
+    def __init__(self, config=None):
+        self.config = config
         self.last_run = None
         self.last_error = None
         
-        # Predefined sentiment lexicons for more accurate analysis
-        self.positive_words = {
-            'excellent', 'amazing', 'wonderful', 'fantastic', 'great', 'good', 'positive',
-            'success', 'achievement', 'breakthrough', 'progress', 'improvement', 'benefit',
-            'opportunity', 'hope', 'optimistic', 'confident', 'pleased', 'satisfied',
-            'outstanding', 'remarkable', 'impressive', 'innovative', 'revolutionary'
-        }
+        # Get API configuration dynamically
+        if config:
+            self.api_key = config.get_huggingface_key()
+            models = config.get_huggingface_models()
+            self.api_url = f"https://api-inference.huggingface.co/models/{models['sentiment']}"
+        else:
+            # Fallback to environment/secrets file
+            self.api_key = self._load_api_key_from_secrets()
+            self.api_url = "https://api-inference.huggingface.co/models/cardiffnlp/twitter-roberta-base-sentiment"
         
-        self.negative_words = {
-            'terrible', 'awful', 'horrible', 'bad', 'negative', 'failure', 'disaster',
-            'crisis', 'problem', 'issue', 'concern', 'worry', 'fear', 'threat', 'risk',
-            'decline', 'decrease', 'loss', 'damage', 'harm', 'danger', 'critical',
-            'devastating', 'alarming', 'shocking', 'disturbing', 'troubling'
-        }
+        if not self.api_key:
+            logger.warning("No Hugging Face API key found. Sentiment analysis will use fallback methods.")
         
-        self.neutral_words = {
-            'report', 'announce', 'state', 'according', 'data', 'information', 'study',
-            'research', 'analysis', 'review', 'update', 'news', 'statement'
+        # Label mapping for the model
+        self.label_mapping = {
+            'LABEL_0': 'negative',
+            'LABEL_1': 'neutral', 
+            'LABEL_2': 'positive'
         }
-        
-        # Initialize Hugging Face sentiment analysis pipeline
-        try:
-            # Use a lightweight, fast model for sentiment analysis
-            model_name = "cardiffnlp/twitter-roberta-base-sentiment-latest"
-            
-            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-            self.model = AutoModelForSequenceClassification.from_pretrained(model_name)
-            
-            # Create pipeline
-            self.sentiment_pipeline = pipeline(
-                "sentiment-analysis",
-                model=self.model,
-                tokenizer=self.tokenizer,
-                device=0 if torch.cuda.is_available() else -1,  # Use GPU if available
-                return_all_scores=True
-            )
-            
-            # Label mapping for the model
-            self.label_mapping = {
-                'LABEL_0': 'negative',
-                'LABEL_1': 'neutral', 
-                'LABEL_2': 'positive'
-            }
-            
-            logger.info("Sentiment analyzer initialized with Hugging Face model")
-            
-        except Exception as e:
-            logger.error(f"Error initializing sentiment analyzer: {e}")
-            self.sentiment_pipeline = None
-            self.last_error = str(e)
     
+    def _load_api_key_from_secrets(self) -> str:
+        """Load API key from secrets file"""
+        try:
+            with open('secrets.env', 'r') as f:
+                for line in f:
+                    if line.strip().startswith('HF_API_KEY='):
+                        return line.strip().split('=', 1)[1].strip()
+        except Exception as e:
+            logger.warning(f"Could not load Hugging Face API key from secrets: {e}")
+        return None
+
     async def analyze(self, text: str) -> Dict[str, Any]:
-        """Analyze sentiment of given text"""
+        """Analyze sentiment of given text using Hugging Face Inference API with fallback methods."""
         try:
             self.last_run = datetime.now().isoformat()
             
@@ -80,28 +58,16 @@ class SentimentAnalyzerAgent:
                     'method': 'empty_text'
                 }
             
-            # Clean and preprocess text
             cleaned_text = self._preprocess_text(text)
             
-            # Multiple sentiment analysis approaches
-            if self.sentiment_pipeline:
+            if self.api_key:
                 try:
-                    hf_result = await self._huggingface_analysis(cleaned_text)
-                    
-                    # Combine with lexicon-based analysis for better accuracy
-                    lexicon_result = self._lexicon_based_analysis(cleaned_text)
-                    
-                    # Weighted combination
-                    combined_result = self._combine_results(hf_result, lexicon_result)
-                    
-                    return combined_result
-                    
+                    return await self._comprehensive_sentiment_analysis(cleaned_text)
                 except Exception as e:
-                    logger.warning(f"Hugging Face analysis failed, falling back to lexicon: {e}")
-                    return self._lexicon_based_analysis(cleaned_text)
+                    logger.warning(f"Hugging Face API call failed: {e}")
+                    return self._fallback_sentiment_analysis(cleaned_text)
             else:
-                # Fallback to lexicon-based analysis
-                return self._lexicon_based_analysis(cleaned_text)
+                return self._fallback_sentiment_analysis(cleaned_text)
                 
         except Exception as e:
             self.last_error = str(e)
@@ -110,165 +76,154 @@ class SentimentAnalyzerAgent:
                 'label': 'neutral',
                 'score': 0.0,
                 'confidence': 0.0,
-                'error': str(e)
+                'error': str(e),
+                'method': 'error_fallback'
             }
     
-    async def _huggingface_analysis(self, text: str) -> Dict[str, Any]:
-        """Perform sentiment analysis using Hugging Face model"""
-        try:
-            # Truncate text if too long (model limit is usually 512 tokens)
-            if len(text) > 400:  # Conservative limit
-                text = text[:400] + "..."
-            
-            # Run inference
-            results = self.sentiment_pipeline(text)
-            
-            # Process results
-            if results and len(results) > 0:
-                # Get the result with highest confidence
-                best_result = max(results[0], key=lambda x: x['score'])
-                
-                # Map label
-                raw_label = best_result['label']
-                mapped_label = self.label_mapping.get(raw_label, raw_label.lower())
-                
-                # Convert score to our format (-1 to 1)
-                confidence = best_result['score']
-                if mapped_label == 'positive':
-                    score = confidence
-                elif mapped_label == 'negative':
-                    score = -confidence
-                else:  # neutral
-                    score = 0.0
-                
-                return {
-                    'label': mapped_label,
-                    'score': score,
-                    'confidence': confidence,
-                    'method': 'huggingface',
-                    'raw_results': results[0]
-                }
-            else:
-                raise ValueError("No results from Hugging Face model")
-                
-        except Exception as e:
-            logger.error(f"Hugging Face analysis error: {e}")
-            raise
+    async def _comprehensive_sentiment_analysis(self, text: str) -> Dict[str, Any]:
+        """Comprehensive sentiment analysis using Hugging Face API"""
+        # Get primary sentiment from API
+        api_result = self._huggingface_api_analysis(text)
+        
+        # Enhance with additional analysis
+        keyword_sentiment = self._keyword_based_sentiment(text)
+        intensity_score = self._calculate_intensity(text)
+        
+        # Combine results
+        primary_label = api_result['label']
+        primary_confidence = api_result['confidence']
+        
+        # Adjust confidence based on keyword analysis agreement
+        if keyword_sentiment['label'] == primary_label:
+            adjusted_confidence = min(primary_confidence + 0.1, 1.0)
+        else:
+            adjusted_confidence = max(primary_confidence - 0.1, 0.0)
+        
+        return {
+            'label': primary_label,
+            'score': api_result['score'],
+            'confidence': adjusted_confidence,
+            'intensity': intensity_score,
+            'keyword_analysis': keyword_sentiment,
+            'method': 'comprehensive_huggingface_api',
+            'raw_api_result': api_result.get('raw_results', [])
+        }
     
-    def _preprocess_text(self, text: str) -> str:
-        """Clean and preprocess text for analysis"""
-        # Convert to lowercase
-        text = text.lower()
+    def _fallback_sentiment_analysis(self, text: str) -> Dict[str, Any]:
+        """Fallback sentiment analysis using keyword-based approach"""
+        keyword_result = self._keyword_based_sentiment(text)
+        intensity = self._calculate_intensity(text)
         
-        # Remove URLs
-        text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\$$\$$,]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '', text)
-        
-        # Remove special characters but keep spaces and basic punctuation
-        text = re.sub(r'[^a-zA-Z0-9\s.,!?-]', '', text)
-        
-        # Remove extra whitespace
-        text = ' '.join(text.split())
-        
-        return text
-    
-    def _lexicon_based_analysis(self, text: str) -> Dict[str, Any]:
-        """Sentiment analysis using predefined word lexicons"""
-        try:
-            words = text.split()
-            
-            positive_count = sum(1 for word in words if word in self.positive_words)
-            negative_count = sum(1 for word in words if word in self.negative_words)
-            neutral_count = sum(1 for word in words if word in self.neutral_words)
-            
-            total_sentiment_words = positive_count + negative_count + neutral_count
-            
-            if total_sentiment_words == 0:
-                return {
-                    'label': 'neutral',
-                    'score': 0.0,
-                    'confidence': 0.5,
-                    'method': 'lexicon'
-                }
-            
-            # Calculate weighted score
-            positive_weight = positive_count / len(words)
-            negative_weight = negative_count / len(words)
-            neutral_weight = neutral_count / len(words)
-            
-            score = positive_weight - negative_weight
-            
-            # Determine label
-            if score > 0.02:
-                label = 'positive'
-                confidence = min(0.9, 0.5 + abs(score) * 2)
-            elif score < -0.02:
-                label = 'negative'
-                confidence = min(0.9, 0.5 + abs(score) * 2)
+        return {
+            'label': keyword_result['label'],
+            'score': keyword_result['score'],
+            'confidence': keyword_result['confidence'],
+            'intensity': intensity,
+            'method': 'keyword_fallback'
+        }
+
+    def _huggingface_api_analysis(self, text: str) -> Dict[str, Any]:
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        response = requests.post(self.api_url, headers=headers, json={"inputs": text})
+        response.raise_for_status()
+        results = response.json()
+        if results and isinstance(results, list) and len(results) > 0 and isinstance(results[0], list):
+            best_result = max(results[0], key=lambda x: x['score'])
+            raw_label = best_result['label']
+            mapped_label = self.label_mapping.get(raw_label, raw_label.lower())
+            confidence = best_result['score']
+            if mapped_label == 'positive':
+                score = confidence
+            elif mapped_label == 'negative':
+                score = -confidence
             else:
-                label = 'neutral'
-                confidence = 0.6
-            
+                score = 0.0
             return {
-                'label': label,
+                'label': mapped_label,
                 'score': score,
                 'confidence': confidence,
-                'method': 'lexicon',
-                'positive_words': positive_count,
-                'negative_words': negative_count,
-                'neutral_words': neutral_count
+                'method': 'huggingface_api',
+                'raw_results': results[0]
             }
-            
-        except Exception as e:
-            logger.error(f"Lexicon analysis error: {e}")
+        else:
+            logger.warning(f"Unexpected API result: {results}")
             return {
                 'label': 'neutral',
                 'score': 0.0,
                 'confidence': 0.0,
-                'error': str(e)
+                'error': 'Unexpected API result',
+                'method': 'huggingface_api_error',
+                'raw': results
             }
+
+    def _keyword_based_sentiment(self, text: str) -> Dict[str, Any]:
+        """Keyword-based sentiment analysis as fallback"""
+        positive_words = [
+            'good', 'great', 'excellent', 'amazing', 'wonderful', 'fantastic', 'positive',
+            'happy', 'joy', 'success', 'achievement', 'progress', 'improvement', 'beneficial'
+        ]
+        
+        negative_words = [
+            'bad', 'terrible', 'awful', 'horrible', 'negative', 'sad', 'angry', 'hate',
+            'failure', 'problem', 'crisis', 'disaster', 'dangerous', 'harmful', 'devastating'
+        ]
+        
+        neutral_words = [
+            'okay', 'average', 'normal', 'standard', 'typical', 'regular', 'moderate'
+        ]
+        
+        text_lower = text.lower()
+        words = text_lower.split()
+        
+        positive_count = sum(1 for word in words if word in positive_words)
+        negative_count = sum(1 for word in words if word in negative_words)
+        neutral_count = sum(1 for word in words if word in neutral_words)
+        
+        total_sentiment_words = positive_count + negative_count + neutral_count
+        
+        if total_sentiment_words == 0:
+            return {'label': 'neutral', 'score': 0.0, 'confidence': 0.1}
+        
+        if positive_count > negative_count and positive_count > neutral_count:
+            confidence = positive_count / max(total_sentiment_words, 1)
+            return {'label': 'positive', 'score': confidence, 'confidence': confidence}
+        elif negative_count > positive_count and negative_count > neutral_count:
+            confidence = negative_count / max(total_sentiment_words, 1)
+            return {'label': 'negative', 'score': -confidence, 'confidence': confidence}
+        else:
+            confidence = max(neutral_count / max(total_sentiment_words, 1), 0.1)
+            return {'label': 'neutral', 'score': 0.0, 'confidence': confidence}
     
-    def _combine_results(self, hf_result: Dict[str, Any], lexicon_result: Dict[str, Any]) -> Dict[str, Any]:
-        """Combine Hugging Face and lexicon results for better accuracy"""
-        try:
-            # Weight the results (HF gets more weight)
-            hf_weight = 0.7
-            lexicon_weight = 0.3
-            
-            # Combine scores
-            combined_score = (
-                hf_result['score'] * hf_weight + 
-                lexicon_result['score'] * lexicon_weight
-            )
-            
-            # Determine final label based on combined score
-            if combined_score > 0.1:
-                final_label = 'positive'
-            elif combined_score < -0.1:
-                final_label = 'negative'
-            else:
-                final_label = 'neutral'
-            
-            # Calculate combined confidence
-            combined_confidence = (
-                hf_result['confidence'] * hf_weight + 
-                lexicon_result['confidence'] * lexicon_weight
-            )
-            
-            return {
-                'label': final_label,
-                'score': combined_score,
-                'confidence': combined_confidence,
-                'method': 'combined',
-                'details': {
-                    'huggingface': hf_result,
-                    'lexicon': lexicon_result
-                }
-            }
-            
-        except Exception as e:
-            logger.error(f"Error combining results: {e}")
-            # Return HF result as fallback
-            return hf_result
+    def _calculate_intensity(self, text: str) -> float:
+        """Calculate sentiment intensity based on text features"""
+        intensity_indicators = [
+            '!', '!!', '!!!', '?', '??', '???',
+            'very', 'extremely', 'incredibly', 'absolutely', 'completely',
+            'totally', 'entirely', 'utterly', 'really', 'truly'
+        ]
+        
+        text_lower = text.lower()
+        intensity_count = sum(text_lower.count(indicator) for indicator in intensity_indicators)
+        
+        # Normalize intensity score
+        max_intensity = 10  # Arbitrary max
+        intensity_score = min(intensity_count / max_intensity, 1.0)
+        
+        return intensity_score
+    
+    def _preprocess_text(self, text: str) -> str:
+        """Preprocess text for sentiment analysis"""
+        # Remove URLs
+        text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*$\$,]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '', text)
+        
+        # Remove extra whitespace
+        text = ' '.join(text.split())
+        
+        # Limit text length for API (most models have token limits)
+        if len(text) > 500:
+            text = text[:500] + "..."
+        
+        return text
     
     async def analyze_batch(self, texts: List[str]) -> List[Dict[str, Any]]:
         """Analyze sentiment for multiple texts efficiently"""
@@ -321,34 +276,4 @@ class SentimentAnalyzerAgent:
         except Exception as e:
             logger.error(f"Error in emotion breakdown: {e}")
             return {}
-    
-    def health_check(self) -> bool:
-        """Check if the sentiment analyzer is healthy"""
-        try:
-            # Test with simple text
-            test_text = "This is a good test"
-            
-            if self.sentiment_pipeline:
-                # Test Hugging Face pipeline
-                result = self.sentiment_pipeline(test_text)
-                return bool(result)
-            else:
-                # Test lexicon analysis
-                result = self._lexicon_based_analysis(test_text)
-                return result.get('label') is not None
-                
-        except Exception as e:
-            self.last_error = str(e)
-            logger.error(f"Health check failed: {e}")
-            return False
-    
-    def clear_cache(self):
-        """Clear any cached data"""
-        self.last_error = None
-        logger.info("Sentiment analyzer cache cleared")
-    
-    def restart(self):
-        """Restart the sentiment analyzer"""
-        self.clear_cache()
-        self.last_run = None
-        logger.info("Sentiment analyzer restarted")
+

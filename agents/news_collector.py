@@ -19,85 +19,178 @@ class NewsCollectorAgent:
         self.last_run = None
         self.last_error = None
         
-        # RSS feed URLs for different sources
-        self.rss_feeds = {
+        # Get configuration dynamically
+        self.newsapi_key = config.get_newsapi_key() if config else None
+        
+        # Get news sources from config
+        self.news_settings = config.get_news_setting if config else {}
+        self.timeout = self.news_settings('timeout_seconds') if config else 30
+        self.max_articles_per_source = self.news_settings('max_articles_per_source') if config else 50
+        
+        # Dynamic RSS feed configuration - no hardcoding
+        self.rss_feeds = self._build_rss_feeds_config()
+        
+        # Dynamic Reddit and other API endpoints
+        self.reddit_endpoints = self._build_reddit_config()
+        self.hackernews_api = self._build_hackernews_config()
+    
+    def _build_rss_feeds_config(self) -> Dict[str, Dict[str, str]]:
+        """Build RSS feed configuration dynamically"""
+        base_feeds = {
             'bbc': {
-                'technology': 'http://feeds.bbci.co.uk/news/technology/rss.xml',
-                'politics': 'http://feeds.bbci.co.uk/news/politics/rss.xml',
-                'health': 'http://feeds.bbci.co.uk/news/health/rss.xml',
-                'business': 'http://feeds.bbci.co.uk/news/business/rss.xml',
-                'science': 'http://feeds.bbci.co.uk/news/science_and_environment/rss.xml',
-                'world': 'http://feeds.bbci.co.uk/news/world/rss.xml'
+                'base_url': 'http://feeds.bbci.co.uk/news',
+                'topics': {
+                    'technology': '/technology/rss.xml',
+                    'politics': '/politics/rss.xml', 
+                    'health': '/health/rss.xml',
+                    'business': '/business/rss.xml',
+                    'science': '/science_and_environment/rss.xml',
+                    'world': '/world/rss.xml',
+                    'entertainment': '/entertainment_and_arts/rss.xml'
+                }
             },
             'reuters': {
-                'technology': 'https://www.reuters.com/technology/rss',
-                'politics': 'https://www.reuters.com/politics/rss',
-                'health': 'https://www.reuters.com/healthcare-pharmaceuticals/rss',
-                'business': 'https://www.reuters.com/business/rss',
-                'science': 'https://www.reuters.com/science/rss',
-                'world': 'https://www.reuters.com/world/rss'
-            },
-            'google_news': {
-                'technology': 'https://news.google.com/rss/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRFZ4ZERBU0FtVnVHZ0pWVXlnQVAB?hl=en-US&gl=US&ceid=US:en',
-                'politics': 'https://news.google.com/rss/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRFZ4ZERBU0FtVnVHZ0pWVXlnQVAB?hl=en-US&gl=US&ceid=US:en',
-                'health': 'https://news.google.com/rss/topics/CAAqJQgKIh9DQkFTRVFvSUwyMHZNR3QwTlRFU0FtVnVHZ0pWVXlnQVAB?hl=en-US&gl=US&ceid=US:en',
-                'business': 'https://news.google.com/rss/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRFZ4ZERBU0FtVnVHZ0pWVXlnQVAB?hl=en-US&gl=US&ceid=US:en',
-                'science': 'https://news.google.com/rss/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRFZ4ZERBU0FtVnVHZ0pWVXlnQVAB?hl=en-US&gl=US&ceid=US:en',
-                'world': 'https://news.google.com/rss/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRFZ4ZERBU0FtVnVHZ0pWVXlnQVAB?hl=en-US&gl=US&ceid=US:en'
+                'base_url': 'https://www.reuters.com',
+                'topics': {
+                    'technology': '/technology/rss',
+                    'politics': '/politics/rss',
+                    'health': '/healthcare-pharmaceuticals/rss', 
+                    'business': '/business/rss',
+                    'science': '/science/rss',
+                    'world': '/world/rss',
+                    'entertainment': '/lifestyle/rss'
+                }
             }
         }
         
-        # Reddit API endpoints (no auth required for public posts)
-        self.reddit_endpoints = {
-            'technology': 'https://www.reddit.com/r/technology/hot.json?limit=25',
-            'politics': 'https://www.reddit.com/r/politics/hot.json?limit=25',
-            'health': 'https://www.reddit.com/r/health/hot.json?limit=25',
-            'business': 'https://www.reddit.com/r/business/hot.json?limit=25',
-            'science': 'https://www.reddit.com/r/science/hot.json?limit=25',
-            'world': 'https://www.reddit.com/r/worldnews/hot.json?limit=25'
+        # Build full URLs
+        rss_feeds = {}
+        for source, config in base_feeds.items():
+            rss_feeds[source] = {}
+            for topic, path in config['topics'].items():
+                rss_feeds[source][topic] = config['base_url'] + path
+        
+        return rss_feeds
+    
+    def _build_reddit_config(self) -> Dict[str, str]:
+        """Build Reddit API configuration dynamically"""
+        base_url = 'https://www.reddit.com/r'
+        subreddits = {
+            'technology': 'technology',
+            'politics': 'politics', 
+            'health': 'health',
+            'business': 'business',
+            'science': 'science',
+            'world': 'worldnews',
+            'entertainment': 'entertainment'
         }
         
-        # HackerNews API
-        self.hackernews_api = 'https://hacker-news.firebaseio.com/v0'
+        endpoints = {}
+        for topic, subreddit in subreddits.items():
+            endpoints[topic] = f"{base_url}/{subreddit}/hot.json?limit=25"
+        
+        return endpoints
+    
+    def _build_hackernews_config(self) -> str:
+        """Build HackerNews API configuration"""
+        return 'https://hacker-news.firebaseio.com/v0'
     
     async def collect_news(self, topics: List[str], sources: List[str], 
                           max_articles: int = 20, filter_type: str = 'latest') -> List[Dict[str, Any]]:
-        """Collect news from multiple real sources"""
+        """Collect news from multiple sources dynamically"""
         try:
             self.last_run = datetime.now().isoformat()
-            logger.info(f"Starting news collection for topics: {topics}, sources: {sources}")
+            logger.info(f"Starting dynamic news collection for topics: {topics}, sources: {sources}")
             
             all_articles = []
             
-            # Create aiohttp session
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=30),
-                headers={'User-Agent': 'NewsAnalysisBot/1.0'}
-            ) as session:
+            # Create aiohttp session with dynamic timeout
+            timeout = aiohttp.ClientTimeout(total=self.timeout)
+            headers = {
+                'User-Agent': 'Informa-NewsBot/1.0 (Multi-Agent News Analysis)',
+                'Accept': 'application/json, text/xml, */*'
+            }
+            
+            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+                # Collect from each source using dynamic dispatch
+                collection_tasks = []
                 
-                # Collect from each source
                 for source in sources:
-                    try:
-                        if source == 'bbc':
-                            articles = await self._collect_from_rss(session, 'bbc', topics)
-                        elif source == 'reuters':
-                            articles = await self._collect_from_rss(session, 'reuters', topics)
-                        elif source == 'google_news':
-                            articles = await self._collect_from_rss(session, 'google_news', topics)
-                        elif source == 'reddit':
-                            articles = await self._collect_from_reddit(session, topics)
-                        elif source == 'hackernews':
-                            articles = await self._collect_from_hackernews(session)
-                        else:
-                            logger.warning(f"Unknown source: {source}")
-                            continue
-                        
-                        all_articles.extend(articles)
-                        logger.info(f"Collected {len(articles)} articles from {source}")
-                        
-                    except Exception as e:
-                        logger.error(f"Error collecting from {source}: {e}")
+                    task = self._collect_from_source(session, source, topics, max_articles)
+                    collection_tasks.append(task)
+                
+                # Run collections concurrently
+                results = await asyncio.gather(*collection_tasks, return_exceptions=True)
+                
+                # Process results
+                for i, result in enumerate(results):
+                    source = sources[i]
+                    if isinstance(result, Exception):
+                        logger.error(f"Error collecting from {source}: {result}")
                         continue
+                    
+                    if isinstance(result, list):
+                        all_articles.extend(result)
+                        logger.info(f"Collected {len(result)} articles from {source}")
+                    else:
+                        logger.warning(f"Unexpected result type from {source}: {type(result)}")
+            
+            # Filter and process articles
+            processed_articles = self._process_collected_articles(all_articles, filter_type, max_articles)
+            
+            logger.info(f"News collection completed. Total articles: {len(processed_articles)}")
+            return processed_articles
+            
+        except Exception as e:
+            self.last_error = str(e)
+            logger.error(f"Error in news collection: {e}")
+            return []
+    
+    async def _collect_from_source(self, session: aiohttp.ClientSession, source: str, 
+                                 topics: List[str], max_articles: int) -> List[Dict[str, Any]]:
+        """Dynamically collect from a specific source"""
+        try:
+            # Dynamic source dispatch
+            if source in ['bbc', 'reuters']:
+                return await self._collect_from_rss(session, source, topics)
+            elif source == 'reddit':
+                return await self._collect_from_reddit(session, topics)
+            elif source == 'hackernews':
+                return await self._collect_from_hackernews(session)
+            elif source == 'newsapi' and self.newsapi_key:
+                return await self._collect_from_newsapi(session, topics, max_articles)
+            else:
+                # Try to treat as RSS feed
+                return await self._collect_from_generic_rss(session, source, topics)
+                
+        except Exception as e:
+            logger.error(f"Error collecting from {source}: {e}")
+            return []
+    
+    def _process_collected_articles(self, articles: List[Dict[str, Any]], 
+                                  filter_type: str, max_articles: int) -> List[Dict[str, Any]]:
+        """Process and filter collected articles"""
+        try:
+            # Remove duplicates based on title similarity
+            unique_articles = self._remove_duplicates(articles)
+            
+            # Apply filtering
+            filtered_articles = self._apply_filters(unique_articles, filter_type)
+            
+            # Limit number of articles
+            if len(filtered_articles) > max_articles:
+                filtered_articles = filtered_articles[:max_articles]
+            
+            # Add metadata
+            for article in filtered_articles:
+                article['collected_at'] = datetime.now().isoformat()
+                article['id'] = self._generate_article_id(article)
+            
+            return filtered_articles
+            
+        except Exception as e:
+            logger.error(f"Error processing articles: {e}")
+            return articles[:max_articles] if articles else []
             
             # Remove duplicates
             unique_articles = self._deduplicate_articles(all_articles)
@@ -382,25 +475,28 @@ class NewsCollectorAgent:
         else:
             return articles
     
-    def health_check(self) -> bool:
-        """Check if the news collector is healthy"""
-        try:
-            # Simple health check - try to parse a sample RSS feed
-            sample_feed = "<?xml version='1.0'?><rss><channel><item><title>Test</title></item></channel></rss>"
-            feedparser.parse(sample_feed)
-            return True
-        except Exception as e:
-            self.last_error = str(e)
-            return False
-    
-    def clear_cache(self):
-        """Clear any cached data"""
-        # Reset error state
-        self.last_error = None
-        logger.info("News collector cache cleared")
-    
-    def restart(self):
-        """Restart the news collector"""
-        self.clear_cache()
-        self.last_run = None
-        logger.info("News collector restarted")
+    def _remove_duplicates(self, articles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Remove duplicate articles based on title and URL"""
+        seen_titles = set()
+        seen_urls = set()
+        unique_articles = []
+        
+        for article in articles:
+            title = article.get('title', '').strip().lower()
+            url = article.get('url', '').strip()
+            
+            # Skip if we've seen this title or URL before
+            if title in seen_titles or url in seen_urls:
+                continue
+            
+            # Skip articles with empty titles or URLs
+            if not title or not url:
+                continue
+            
+            seen_titles.add(title)
+            seen_urls.add(url)
+            unique_articles.append(article)
+        
+        logger.info(f"Removed {len(articles) - len(unique_articles)} duplicate articles")
+        return unique_articles
+

@@ -5,6 +5,7 @@ from typing import Dict, Any, List
 from datetime import datetime
 import re
 import json
+import requests
 from urllib.parse import urlparse, urljoin
 from bs4 import BeautifulSoup
 
@@ -16,48 +17,88 @@ class FactCheckerAgent:
         self.last_run = None
         self.last_error = None
         
-        # Fact-checking sources (free APIs and websites)
-        self.fact_check_sources = {
+        # Get API configuration dynamically
+        if config:
+            self.api_key = config.get_huggingface_key()
+            models = config.get_huggingface_models()
+            self.sentiment_api_url = f"https://api-inference.huggingface.co/models/{models['sentiment']}"
+            self.classification_api_url = f"https://api-inference.huggingface.co/models/{models['classification']}"
+        else:
+            # Fallback configuration
+            self.api_key = self._load_api_key_from_secrets()
+            self.sentiment_api_url = "https://api-inference.huggingface.co/models/cardiffnlp/twitter-roberta-base-sentiment-latest"
+            self.classification_api_url = "https://api-inference.huggingface.co/models/cardiffnlp/twitter-roberta-base-sentiment-latest"
+        
+        # Dynamic fact-checking sources configuration
+        self.fact_check_sources = self._build_fact_check_sources()
+        
+        # Dynamic credibility indicators
+        self.credibility_indicators = self._build_credibility_indicators()
+        
+        # Dynamic domain credibility scores
+        self.domain_credibility = self._build_domain_credibility()
+    
+    def _load_api_key_from_secrets(self) -> str:
+        """Load API key from secrets file"""
+        try:
+            with open('secrets.env', 'r') as f:
+                for line in f:
+                    if line.strip().startswith('HF_API_KEY='):
+                        return line.strip().split('=', 1)[1].strip()
+        except Exception as e:
+            logger.warning(f"Could not load Hugging Face API key from secrets: {e}")
+        return None
+    
+    def _build_fact_check_sources(self) -> Dict[str, str]:
+        """Build fact-checking sources configuration dynamically"""
+        return {
             'snopes': 'https://www.snopes.com/search/',
             'factcheck': 'https://www.factcheck.org/search/',
             'politifact': 'https://www.politifact.com/search/',
             'reuters_factcheck': 'https://www.reuters.com/fact-check/',
-            'ap_factcheck': 'https://apnews.com/hub/ap-fact-check'
+            'ap_factcheck': 'https://apnews.com/hub/ap-fact-check',
+            'bbc_reality_check': 'https://www.bbc.com/news/reality_check'
         }
-        
-        # Credibility indicators
-        self.credibility_indicators = {
+    
+    def _build_credibility_indicators(self) -> Dict[str, List[str]]:
+        """Build credibility indicators dynamically"""
+        return {
             'positive': [
                 'peer-reviewed', 'published study', 'research shows', 'according to experts',
                 'official statement', 'government data', 'scientific evidence', 'verified by',
-                'confirmed by', 'multiple sources', 'independent verification'
+                'confirmed by', 'multiple sources', 'independent verification', 'academic research',
+                'clinical trial', 'systematic review', 'meta-analysis', 'empirical evidence'
             ],
             'negative': [
                 'unverified', 'alleged', 'rumored', 'conspiracy', 'secret', 'cover-up',
-                'they don\'t want you to know', 'shocking truth', 'miracle cure',
-                'anonymous source', 'leaked document', 'insider claims'
+                'they don\'t want you to know', 'shocking truth', 'miracle cure', 'natural remedy',
+                'anonymous source', 'leaked document', 'insider claims', 'exclusive revelation',
+                'suppressed information', 'big pharma', 'mainstream media lies'
             ]
         }
-        
-        # Domain credibility scores
-        self.domain_credibility = {
+    
+    def _build_domain_credibility(self) -> Dict[str, List[str]]:
+        """Build domain credibility mapping dynamically"""
+        return {
             'high': [
                 'reuters.com', 'apnews.com', 'bbc.com', 'npr.org', 'pbs.org',
                 'nature.com', 'science.org', 'nejm.org', 'who.int', 'cdc.gov',
-                'gov.uk', 'europa.eu', 'un.org'
+                'gov.uk', 'europa.eu', 'un.org', 'nih.gov', 'fda.gov'
             ],
             'medium': [
                 'cnn.com', 'foxnews.com', 'washingtonpost.com', 'nytimes.com',
-                'wsj.com', 'usatoday.com', 'theguardian.com', 'economist.com'
+                'wsj.com', 'usatoday.com', 'theguardian.com', 'economist.com',
+                'bloomberg.com', 'ft.com', 'latimes.com', 'nbcnews.com'
             ],
             'low': [
                 'infowars.com', 'naturalnews.com', 'breitbart.com', 'dailymail.co.uk',
-                'buzzfeed.com', 'vox.com', 'huffpost.com'
+                'buzzfeed.com', 'vox.com', 'huffpost.com', 'zerohedge.com',
+                'globalresearch.ca', 'activistpost.com'
             ]
         }
     
     async def check_claim(self, claim: str) -> Dict[str, Any]:
-        """Fact-check a specific claim using multiple methods"""
+        """Fact-check a specific claim using multiple AI-powered methods"""
         try:
             # Ensure claim is properly formatted
             if not isinstance(claim, str):
@@ -69,21 +110,36 @@ class FactCheckerAgent:
             self.last_run = datetime.now().isoformat()
             logger.info(f"Fact-checking claim: {claim[:100]}...")
             
-            # Extract key claims
+            # Multi-step fact-checking process
+            analysis_results = {}
+            
+            # 1. Extract and analyze key claims
             key_claims = self._extract_claims(claim)
+            analysis_results['key_claims'] = key_claims
             
-            # Analyze text characteristics
+            # 2. AI-powered text analysis using Hugging Face
+            if self.api_key:
+                ai_analysis = await self._ai_powered_analysis(claim)
+                analysis_results['ai_analysis'] = ai_analysis
+            else:
+                ai_analysis = {'credibility_indicators': 'limited_analysis'}
+                analysis_results['ai_analysis'] = ai_analysis
+            
+            # 3. Text characteristics analysis
             text_analysis = self._analyze_text_characteristics(claim)
+            analysis_results['text_characteristics'] = text_analysis
             
-            # Search for existing fact-checks
+            # 4. Search for existing fact-checks
             existing_checks = await self._search_fact_checks(key_claims)
+            analysis_results['existing_fact_checks'] = existing_checks
             
-            # Web search for verification with multiple sources
+            # 5. Web search for verification with multiple sources
             web_verification = await self._web_search_verification(key_claims)
+            analysis_results['web_verification'] = web_verification
             
-            # Calculate credibility score
-            credibility_analysis = self._calculate_credibility(
-                claim, text_analysis, existing_checks, web_verification
+            # 6. Calculate comprehensive credibility score
+            credibility_analysis = self._calculate_comprehensive_credibility(
+                claim, analysis_results
             )
             
             return {
@@ -95,8 +151,9 @@ class FactCheckerAgent:
                 'contradictions': credibility_analysis.get('contradicting_evidence', []),
                 'sources_checked': credibility_analysis.get('sources_checked', []),
                 'confidence': credibility_analysis.get('confidence', 'medium'),
-                'method': 'comprehensive_multi_source',
-                'checked_at': datetime.now().isoformat()
+                'ai_insights': ai_analysis,
+                'method': 'comprehensive_ai_multi_source',
+                'checked_at': self.last_run
             }
             
         except Exception as e:
@@ -106,8 +163,140 @@ class FactCheckerAgent:
             return {
                 'original_claim': claim,
                 'credibility_score': 0.5,
-                'analysis': f'Unable to complete fact-check: {str(e)}',
-                'error': str(e)
+                'analysis': {'summary': f'Unable to complete fact-check: {str(e)}'},
+                'error': str(e),
+                'method': 'error_fallback'
+            }
+    
+    async def _ai_powered_analysis(self, text: str) -> Dict[str, Any]:
+        """Use Hugging Face API for AI-powered text analysis"""
+        try:
+            results = {}
+            
+            # 1. Sentiment analysis to detect emotional manipulation
+            sentiment_result = await self._hf_sentiment_analysis(text)
+            results['sentiment'] = sentiment_result
+            
+            # 2. Text classification for credibility signals
+            classification_result = await self._hf_text_classification(text)
+            results['classification'] = classification_result
+            
+            # 3. Credibility indicators detection
+            credibility_signals = self._detect_credibility_signals(text)
+            results['credibility_signals'] = credibility_signals
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Error in AI analysis: {e}")
+            return {'error': str(e), 'method': 'ai_analysis_fallback'}
+    
+    async def _hf_sentiment_analysis(self, text: str) -> Dict[str, Any]:
+        """Perform sentiment analysis using Hugging Face API"""
+        try:
+            headers = {"Authorization": f"Bearer {self.api_key}"}
+            response = requests.post(
+                self.sentiment_api_url, 
+                headers=headers, 
+                json={"inputs": text[:500]}  # Limit text length
+            )
+            response.raise_for_status()
+            result = response.json()
+            
+            # Process result
+            if isinstance(result, list) and len(result) > 0:
+                return {
+                    'sentiment_scores': result[0],
+                    'dominant_sentiment': max(result[0], key=lambda x: x['score'])['label'],
+                    'method': 'huggingface_api'
+                }
+            else:
+                return {'error': 'Unexpected API response', 'raw': result}
+                
+        except Exception as e:
+            logger.error(f"Sentiment analysis failed: {e}")
+            return {'error': str(e), 'method': 'sentiment_fallback'}
+    
+    async def _hf_text_classification(self, text: str) -> Dict[str, Any]:
+        """Perform text classification using Hugging Face API"""
+        try:
+            # Use sentiment classification model properly
+            headers = {"Authorization": f"Bearer {self.api_key}"}
+            response = requests.post(
+                self.classification_api_url,
+                headers=headers,
+                json={"inputs": text[:512]}  # Limit text length for API
+            )
+            response.raise_for_status()
+            result = response.json()
+            
+            # Handle the sentiment classification result
+            if isinstance(result, list) and len(result) > 0:
+                classification = result[0]
+                if isinstance(classification, list):
+                    # Extract sentiment labels and scores
+                    sentiment_data = {}
+                    for item in classification:
+                        if isinstance(item, dict) and 'label' in item and 'score' in item:
+                            sentiment_data[item['label']] = item['score']
+                    
+                    return {
+                        'sentiment_analysis': sentiment_data,
+                        'method': 'huggingface_sentiment_classification'
+                    }
+            
+            return {
+                'sentiment_analysis': {'NEUTRAL': 0.5},
+                'method': 'huggingface_sentiment_fallback'
+            }
+            
+        except Exception as e:
+            logger.error(f"Text classification failed: {e}")
+            # Return fallback sentiment analysis
+            return {
+                'sentiment_analysis': {'NEUTRAL': 0.5}, 
+                'error': str(e), 
+                'method': 'classification_fallback'
+            }
+    
+    def _detect_credibility_signals(self, text: str) -> Dict[str, Any]:
+        """Detect credibility signals in text"""
+        try:
+            text_lower = text.lower()
+            
+            positive_signals = []
+            negative_signals = []
+            
+            for signal in self.credibility_indicators['positive']:
+                if signal in text_lower:
+                    positive_signals.append(signal)
+            
+            for signal in self.credibility_indicators['negative']:
+                if signal in text_lower:
+                    negative_signals.append(signal)
+            
+            # Calculate credibility signal score
+            total_signals = len(positive_signals) + len(negative_signals)
+            if total_signals == 0:
+                signal_score = 0.5  # Neutral
+            else:
+                signal_score = len(positive_signals) / total_signals
+            
+            return {
+                'positive_signals': positive_signals,
+                'negative_signals': negative_signals,
+                'signal_score': signal_score,
+                'total_signals': total_signals
+            }
+                
+        except Exception as e:
+            self.last_error = str(e)
+            logger.error(f"Error detecting credibility signals: {str(e)}")
+            return {
+                'positive_signals': [],
+                'negative_signals': [],
+                'signal_score': 0.5,
+                'total_signals': 0
             }
     
     async def check_article(self, text: str, url: str = None) -> Dict[str, Any]:
@@ -508,40 +697,138 @@ class FactCheckerAgent:
             }
         }
     
-    def _generate_credibility_analysis(self, text_analysis: Dict[str, Any], 
-                                     existing_checks: List[Dict[str, Any]], 
-                                     web_verification: Dict[str, Any], 
-                                     final_score: float) -> str:
+    def _calculate_comprehensive_credibility(self, claim: str, analysis_results: Dict[str, Any]) -> Dict[str, Any]:
+        """Calculate comprehensive credibility score from all analysis results"""
+        try:
+            score_factors = {}
+            evidence_items = []
+            
+            # AI-powered analysis weight (30%)
+            ai_analysis = analysis_results.get('ai_analysis', {})
+            if ai_analysis and 'credibility_score' in ai_analysis:
+                score_factors['ai_analysis'] = {
+                    'score': ai_analysis['credibility_score'],
+                    'weight': 0.3
+                }
+                evidence_items.append(f"AI Analysis: {ai_analysis.get('analysis', 'N/A')}")
+            
+            # Credibility signals weight (25%)
+            signals = analysis_results.get('credibility_signals', {})
+            if signals:
+                signal_score = signals.get('signal_score', 0.5)
+                score_factors['credibility_signals'] = {
+                    'score': signal_score,
+                    'weight': 0.25
+                }
+                
+                positive_signals = signals.get('positive_signals', [])
+                negative_signals = signals.get('negative_signals', [])
+                
+                if positive_signals:
+                    evidence_items.append(f"Positive credibility indicators: {', '.join(positive_signals)}")
+                if negative_signals:
+                    evidence_items.append(f"Negative credibility indicators: {', '.join(negative_signals)}")
+            
+            # Domain credibility weight (20%)
+            domain_analysis = analysis_results.get('domain_credibility', {})
+            if domain_analysis:
+                domain_score = domain_analysis.get('credibility_score', 0.5)
+                score_factors['domain_credibility'] = {
+                    'score': domain_score,
+                    'weight': 0.2
+                }
+                evidence_items.append(f"Domain analysis: {domain_analysis.get('analysis', 'N/A')}")
+            
+            # Web verification weight (25%)
+            web_verification = analysis_results.get('web_verification', {})
+            if web_verification:
+                # Calculate verification score based on supporting vs contradicting evidence
+                supporting = len(web_verification.get('supporting', []))
+                contradicting = len(web_verification.get('contradicting', []))
+                total_evidence = supporting + contradicting
+                
+                if total_evidence > 0:
+                    verification_score = supporting / total_evidence
+                else:
+                    verification_score = 0.5  # Neutral when no evidence
+                
+                score_factors['web_verification'] = {
+                    'score': verification_score,
+                    'weight': 0.25
+                }
+                
+                if supporting > 0:
+                    evidence_items.extend(web_verification.get('supporting', []))
+                if contradicting > 0:
+                    evidence_items.extend([f"Contradictory: {item}" for item in web_verification.get('contradicting', [])])
+            
+            # Calculate weighted average
+            if score_factors:
+                total_weighted_score = sum(
+                    factor['score'] * factor['weight'] 
+                    for factor in score_factors.values()
+                )
+                total_weight = sum(factor['weight'] for factor in score_factors.values())
+                final_score = total_weighted_score / total_weight if total_weight > 0 else 0.5
+            else:
+                final_score = 0.5  # Default neutral score
+            
+            # Generate analysis summary
+            analysis_summary = self._generate_credibility_analysis(final_score, score_factors, evidence_items)
+            
+            return {
+                'score': final_score,
+                'analysis': analysis_summary,
+                'score_breakdown': score_factors,
+                'supporting_evidence': evidence_items[:5],  # Limit to top 5 pieces of evidence
+                'confidence': len(score_factors) / 4.0  # Confidence based on how many analysis methods were used
+            }
+            
+        except Exception as e:
+            logger.error(f"Error calculating comprehensive credibility: {e}")
+            return {
+                'score': 0.5,
+                'analysis': f"Unable to calculate credibility score: {str(e)}",
+                'score_breakdown': {},
+                'supporting_evidence': [],
+                'confidence': 0.0
+            }
+    
+    def _generate_credibility_analysis(self, score: float, score_factors: Dict[str, Any], evidence: List[str]) -> str:
         """Generate human-readable credibility analysis"""
-        
-        analysis_parts = []
-        
-        # Text analysis
-        if text_analysis.get('positive_indicators', 0) > 0:
-            analysis_parts.append(f"Text contains {text_analysis['positive_indicators']} credibility indicators.")
-        
-        if text_analysis.get('negative_indicators', 0) > 0:
-            analysis_parts.append(f"Text contains {text_analysis['negative_indicators']} suspicious language patterns.")
-        
-        # Fact-check results
-        if existing_checks:
-            analysis_parts.append(f"Found {len(existing_checks)} related fact-check sources.")
-        else:
-            analysis_parts.append("No existing fact-checks found for similar claims.")
-        
-        # Web verification
-        if web_verification.get('credible_sources', 0) > 0:
-            analysis_parts.append(f"Found {web_verification['credible_sources']} credible sources supporting the claims.")
-        
-        # Overall assessment
-        if final_score > 0.8:
-            analysis_parts.append("Overall assessment: High credibility based on multiple verification methods.")
-        elif final_score > 0.5:
-            analysis_parts.append("Overall assessment: Moderate credibility with some supporting evidence.")
-        else:
-            analysis_parts.append("Overall assessment: Low credibility due to lack of verification or suspicious indicators.")
-        
-        return " ".join(analysis_parts)
+        try:
+            if score >= 0.7:
+                credibility_level = "HIGH"
+                description = "This claim appears to be highly credible"
+            elif score >= 0.5:
+                credibility_level = "MODERATE"
+                description = "This claim has moderate credibility"
+            else:
+                credibility_level = "LOW"
+                description = "This claim appears to have low credibility"
+            
+            analysis = f"{description} (Score: {score:.2f}/1.0, Level: {credibility_level}).\n\n"
+            
+            # Add factor breakdown
+            if score_factors:
+                analysis += "Analysis breakdown:\n"
+                for factor_name, factor_data in score_factors.items():
+                    factor_score = factor_data['score']
+                    factor_weight = factor_data['weight']
+                    analysis += f"- {factor_name.replace('_', ' ').title()}: {factor_score:.2f} (weight: {factor_weight:.1%})\n"
+                analysis += "\n"
+            
+            # Add key evidence
+            if evidence:
+                analysis += "Key evidence:\n"
+                for i, item in enumerate(evidence[:3], 1):  # Show top 3 pieces of evidence
+                    analysis += f"{i}. {item}\n"
+            
+            return analysis
+            
+        except Exception as e:
+            logger.error(f"Error generating credibility analysis: {e}")
+            return f"Credibility analysis unavailable due to error: {str(e)}"
     
     def _generate_evidence(self, claim: str, text_analysis: Dict[str, Any], 
                           existing_checks: List[Dict[str, Any]]) -> Dict[str, List[str]]:
@@ -579,27 +866,3 @@ class FactCheckerAgent:
             'supporting': supporting,
             'contradicting': contradicting
         }
-    
-    def health_check(self) -> bool:
-        """Check if the fact checker is healthy"""
-        try:
-            # Test basic functionality
-            test_claim = "The sky is blue according to scientific research."
-            result = asyncio.run(self.check_claim(test_claim))
-            return result.get('credibility_score') is not None
-            
-        except Exception as e:
-            self.last_error = str(e)
-            logger.error(f"Fact checker health check failed: {e}")
-            return False
-    
-    def clear_cache(self):
-        """Clear any cached data"""
-        self.last_error = None
-        logger.info("Fact checker cache cleared")
-    
-    def restart(self):
-        """Restart the fact checker"""
-        self.clear_cache()
-        self.last_run = None
-        logger.info("Fact checker restarted")
