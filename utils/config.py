@@ -2,6 +2,13 @@ import os
 import logging
 from typing import Dict, Any, Optional
 
+# Try to import streamlit for secrets management
+try:
+    import streamlit as st
+    STREAMLIT_AVAILABLE = True
+except ImportError:
+    STREAMLIT_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 class AppConfig:
@@ -219,13 +226,20 @@ class AppConfig:
         }
     
     def get_huggingface_key(self) -> Optional[str]:
-        """Get Hugging Face API key from environment or secrets file"""
-        # First check environment variable
+        """Get Hugging Face API key from Streamlit secrets, environment, or secrets file"""
+        # First check Streamlit secrets (for deployment)
+        if STREAMLIT_AVAILABLE:
+            try:
+                return st.secrets["api_keys"]["HF_API_KEY"]
+            except (KeyError, AttributeError):
+                pass
+        
+        # Then check environment variable
         hf_key = os.getenv('HF_API_KEY')
         if hf_key:
             return hf_key
         
-        # Then check secrets file
+        # Finally check local secrets file (for development)
         try:
             secrets_path = os.path.join(os.getcwd(), 'secrets.env')
             if os.path.exists(secrets_path):
@@ -239,13 +253,20 @@ class AppConfig:
         return None
     
     def get_newsapi_key(self) -> Optional[str]:
-        """Get NewsAPI key from environment or secrets file"""
-        # First check environment variable
+        """Get NewsAPI key from Streamlit secrets, environment, or secrets file"""
+        # First check Streamlit secrets (for deployment)
+        if STREAMLIT_AVAILABLE:
+            try:
+                return st.secrets["api_keys"]["NEWSAPI_KEY"]
+            except (KeyError, AttributeError):
+                pass
+        
+        # Then check environment variable
         api_key = os.getenv('NEWSAPI_KEY')
         if api_key:
             return api_key
         
-        # Then check secrets file
+        # Finally check local secrets file (for development)
         try:
             secrets_path = os.path.join(os.getcwd(), 'secrets.env')
             if os.path.exists(secrets_path):

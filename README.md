@@ -33,12 +33,22 @@
    ```
 
 3. **Set up API Keys**:
-   Create a file named `secrets.env` in the project root with the following contents:
+   
+   **For Local Development:**
+   Copy the template and add your API keys:
+   ```bash
+   cp secrets.env.template secrets.env
+   ```
+   Then edit `secrets.env` with your actual API keys:
    ```
    HF_API_KEY=your_huggingface_api_key
-   NEWSAPI_KEY=your_newsapi_key
+   NEWSAPI_KEY=your_newsapi_key  # Optional
    ```
-   - Get a free Hugging Face API key from [Hugging Face](https://huggingface.co/)
+   
+   **For Streamlit Cloud Deployment:**
+   See [DEPLOYMENT.md](DEPLOYMENT.md) for detailed deployment instructions.
+   
+   - Get a free Hugging Face API key from [Hugging Face](https://huggingface.co/settings/tokens)
    - Get a free NewsAPI key from [NewsAPI](https://newsapi.org/) (optional)
 
 4. **Initialize ChromaDB**:
