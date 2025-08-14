@@ -26,8 +26,12 @@ class ChatAgent:
         
         # Get chat configuration
         chat_config = config.get_chat_config() if config else {}
-        self.api_url = chat_config.get("api_url", "https://api-inference.huggingface.co/models/google/flan-t5-base")
-        self.embedding_api_url = chat_config.get("embedding_api_url", "https://api-inference.huggingface.co/models/sentence-transformers/all-MiniLM-L6-v2")
+        hf_models = config.get_huggingface_models() if config else {}
+        hf_base = (config.get_api_endpoints().get('huggingface_inference') if config else 'https://api-inference.huggingface.co/models')
+        gen_model = hf_models.get('text_generation', 'google/flan-t5-base')
+        emb_model = hf_models.get('embedding', 'sentence-transformers/all-MiniLM-L6-v2')
+        self.api_url = chat_config.get("api_url", f"{hf_base}/{gen_model}")
+        self.embedding_api_url = chat_config.get("embedding_api_url", f"{hf_base}/{emb_model}")
         self.max_sources = chat_config.get("max_sources", 5)
         self.context_window = chat_config.get("context_window", 4000)
         self.last_error = None
@@ -50,8 +54,18 @@ class ChatAgent:
             # Retrieve relevant articles
             relevant_articles = await self._retrieve_relevant_content(query)
             
+            # Fallback to Chroma native search if API-embedding retrieval found nothing
             if not relevant_articles:
-                # If no relevant content, try to fetch new articles via workflow
+                logger.info("API-embedding retrieval returned no results, trying vector DB text search.")
+                relevant_articles = await self.database.semantic_search(
+                    query=query,
+                    embedding_or_model=None,
+                    limit=self.max_sources,
+                    use_api_embedding=False
+                )
+            
+            if not relevant_articles:
+                # If still no relevant content, try to fetch new articles via workflow
                 logger.info("No relevant content found, triggering workflow")
                 result = await self.chat_workflow.process_query(query)
                 
@@ -74,13 +88,13 @@ class ChatAgent:
                 
                 return enhanced_result
                 
-            # Generate context from retrieved articles
-            context = self._build_context(relevant_articles, query)
+            # Prepare structured context blocks for LLM
+            context_blocks = self._format_articles_for_prompt(relevant_articles)
             
-            # Generate answer using the context
-            answer = await self._generate_answer(query, context, self.chat_history)
+            # Generate answer using improved conversational prompt
+            answer = await self._generate_answer(query, context_blocks, self.chat_history)
             
-            # Prepare sources with credibility information
+            # Prepare sources (remove legacy credibility, include verdict if present)
             sources = self._prepare_sources(relevant_articles)
             
             # Generate reasoning explanation
@@ -112,20 +126,10 @@ class ChatAgent:
                 "articles_found": 0,
                 "error": str(e)
             }
-            
-        except Exception as e:
-            self.last_error = str(e)
-            logger.error(f"Error in RAG processing: {e}")
-            return {
-                "response": f"I encountered an error while processing your query: {str(e)}",
-                "confidence": 0.0,
-                "articles_found": 0,
-                "error": str(e)
-            }
     
     async def _retrieve_relevant_content(self, question: str) -> List[Dict[str, Any]]:
         try:
-            # Use Hugging Face API for embedding
+            # Use Hugging Face API for embedding if key available
             question_embedding = self._get_embedding(question)
             if question_embedding is None:
                 logger.error("Failed to get embedding from API.")
@@ -140,11 +144,11 @@ class ChatAgent:
         """Get embeddings from Hugging Face API or fallback to simple embedding"""
         try:
             if not self.api_key:
-                logger.error("No Hugging Face API key provided for embedding.")
+                logger.warning("No Hugging Face API key provided for embedding; using fallback embedding.")
                 return self._create_simple_embedding(text)
             
             headers = {"Authorization": f"Bearer {self.api_key}"}
-            response = requests.post(self.embedding_api_url, headers=headers, json={"inputs": text})
+            response = requests.post(self.embedding_api_url, headers=headers, json={"inputs": text}, timeout=30)
             response.raise_for_status()
             result = response.json()
             
@@ -182,72 +186,105 @@ class ChatAgent:
             
         return embedding.tolist()
 
-    def _build_context(self, articles: List[Dict[str, Any]], question: str) -> str:
-        context_parts = []
-        current_length = 0
-        sorted_articles = sorted(
-            articles, 
-            key=lambda x: x.get('relevance_score', 0), 
-            reverse=True
-        )
-        for i, article in enumerate(sorted_articles):
-            article_text = f"""
-Article {i+1}:
-Title: {article.get('title', 'Unknown')}
-Source: {article.get('source', 'Unknown')}
-Published: {article.get('published_at', 'Unknown')}
-Content: {article.get('content', 'No content available')}
-Credibility Score: {article.get('credibility_score', 'Unknown')}
----
-"""
-            if current_length + len(article_text) > self.context_window:
-                break
-            context_parts.append(article_text)
-            current_length += len(article_text)
-        return "\n".join(context_parts)
+    def _build_context(self, articles: List[Dict[str, Any]], question: str) -> str:  # legacy (kept for backward compat)
+        return self._format_articles_for_prompt(articles)
 
-    async def _generate_answer(self, question: str, context: str, chat_history: List[Dict[str, str]] = None) -> str:
+    def _format_articles_for_prompt(self, articles: List[Dict[str, Any]]) -> str:
+        """Create a compact, enumerated article context for the LLM.
+        Each article limited to conserve tokens. Includes sentiment, bias, fact-check verdict.
+        """
+        if not articles:
+            return ""
+        sorted_articles = sorted(articles, key=lambda x: x.get('relevance_score', 0), reverse=True)
+        parts = []
+        max_chars_total = min(self.context_window, 8000)  # additional safety
+        used = 0
+        for idx, a in enumerate(sorted_articles[: self.max_sources]):
+            content = (a.get('content') or '')
+            # Trim content aggressively
+            snippet = content[:800]
+            if len(snippet) < len(content):
+                snippet += '...'
+            meta = {
+                'source': a.get('source'),
+                'published': a.get('published_at'),
+                'sentiment': a.get('sentiment_label'),
+                'bias_score': a.get('bias_score'),
+                'verdict': a.get('fact_check_verdict')
+            }
+            meta_str = ", ".join(f"{k}={v}" for k, v in meta.items() if v not in (None, '', []))
+            block = f"[SOURCE {idx+1}] Title: {a.get('title','Unknown')}. {meta_str}\nContent: {snippet}\nURL: {a.get('url','')}\n"
+            if used + len(block) > max_chars_total:
+                break
+            parts.append(block)
+            used += len(block)
+        return "\n".join(parts)
+
+    async def _generate_answer(self, question: str, formatted_context: str, chat_history: List[Dict[str, str]] = None) -> str:
+        """Generate an answer using a conversational instruction prompt."""
         history_context = ""
         if chat_history:
-            recent_history = chat_history[-3:]
-            for msg in recent_history:
-                role = msg.get('role', 'unknown')
+            for msg in chat_history[-6:]:  # include last 6 turns max
+                role = msg.get('role', 'user')
                 content = msg.get('content', '')
-                history_context += f"{role.title()}: {content}\n"
+                if role == 'user':
+                    history_context += f"User: {content}\n"
+                else:
+                    history_context += f"Assistant: {content}\n"
         if self.api_key:
             try:
-                return self._generate_with_hf_api(question, context, history_context)
+                return self._generate_with_hf_api(question, formatted_context, history_context)
             except Exception as e:
                 logger.warning(f"Hugging Face API generation failed, using template: {e}")
-        return self._generate_with_template(question, context, history_context)
+        return self._generate_with_template(question, formatted_context, history_context)
 
-    def _generate_with_hf_api(self, question: str, context: str, history_context: str) -> str:
+    def _generate_with_hf_api(self, question: str, formatted_context: str, history_context: str) -> str:
         headers = {"Authorization": f"Bearer {self.api_key}"}
-        prompt = f"""Based on the following news articles, answer the user's question accurately and comprehensively.\n\nPrevious conversation:\n{history_context}\n\nQuestion: {question}\n\nNews articles:\n{context[:1000]}  # Truncate context for model\n\nAnswer:"""
-        response = requests.post(self.api_url, headers=headers, json={"inputs": prompt, "parameters": {"max_new_tokens": 100, "temperature": 0.7}})
+        system_instructions = (
+            "You are a helpful news analysis assistant. Use ONLY the provided SOURCES context. "
+            "Cite sources as [n] where n is the source number. If unsure, say you are unsure. "
+            "Highlight factual conflicts and note any fact_check verdicts. Be concise and conversational."
+        )
+        prompt = (
+            f"<SYSTEM>\n{system_instructions}\n</SYSTEM>\n"
+            f"<CONTEXT>\n{formatted_context}\n</CONTEXT>\n"
+            f"<HISTORY>\n{history_context.strip()}\n</HISTORY>\n"
+            f"<USER_QUESTION>\n{question}\n</USER_QUESTION>\n"
+            "Compose an answer now:\n"
+        )
+        params = {"max_new_tokens": 220, "temperature": 0.6, "top_p": 0.9}
+        response = requests.post(self.api_url, headers=headers, json={"inputs": prompt, "parameters": params}, timeout=60)
         response.raise_for_status()
         result = response.json()
         if isinstance(result, list) and len(result) > 0 and 'generated_text' in result[0]:
             generated_text = result[0]['generated_text']
-            answer = generated_text[len(prompt):].strip()
-            return answer if answer else self._generate_with_template(question, context, history_context)
+            # Attempt to strip the prompt echo if present
+            answer = generated_text.replace(prompt, '').strip()
+            return answer if answer else self._generate_with_template(question, formatted_context, history_context)
         elif isinstance(result, dict) and 'generated_text' in result:
             return result['generated_text']
         else:
             logger.warning(f"Unexpected API result: {result}")
-            return self._generate_with_template(question, context, history_context)
+            return self._generate_with_template(question, formatted_context, history_context)
 
-    def _generate_with_template(self, question: str, context: str, history_context: str) -> str:
-        return f"Based on the news articles, here is a summary answer to your question: {question}\n\n{context[:500]}"
+    def _generate_with_template(self, question: str, context_block: str, history_context: str) -> str:
+        return (
+            f"(Fallback answer) Here's a concise response to: '{question}'.\n"
+            f"Context considered:\n{context_block[:400]}\n"
+            "Provide an API key for improved conversational answers."
+        )
 
     def _prepare_sources(self, articles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         sources = []
-        for article in articles:
+        for idx, article in enumerate(articles):
             sources.append({
+                'index': idx + 1,
                 'title': article.get('title', ''),
                 'url': article.get('url', ''),
                 'source': article.get('source', ''),
-                'credibility_score': article.get('credibility_score', None)
+                'sentiment': article.get('sentiment_label'),
+                'bias_score': article.get('bias_score'),
+                'fact_check_verdict': article.get('fact_check_verdict')
             })
         return sources
 

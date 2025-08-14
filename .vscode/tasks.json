@@ -8,6 +8,14 @@
 			"group": "build",
 			"isBackground": true,
 			"problemMatcher": []
+		},
+		{
+			"label": "Run Informa (venv) on 8502",
+			"type": "shell",
+			"command": "c:\\Users\\ANJANEYA\\Desktop\\Projects\\Informa\\env\\Scripts\\streamlit.exe run app.py --server.port 8502",
+			"isBackground": true,
+			"problemMatcher": [],
+			"group": "build"
 		}
 	]
 }

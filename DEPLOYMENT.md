@@ -2,7 +2,48 @@
 
 ## Prerequisites
 
-1. **GitHub Repository**: Your code should be in a public GitHub repository
+1. **GitHub Repository**: Your code should be in a public GitHub reposi4. **Memory issues**:
+   - Streamlit Cloud has memory limits
+   - The app is optimized for cloud deployment
+
+5. **LangSmith monitoring not showing**:
+   - Verify LANGSMITH_API_KEY is correctly set
+   - Check project name in LangSmith dashboard
+   - Ensure you have access to the LangSmith project
+
+## 📊 LangSmith Monitoring
+
+### What is LangSmith?
+LangSmith is a platform for debugging, testing, and monitoring LLM applications. It provides:
+- **Tracing**: Track every step of your multi-agent workflow
+- **Debugging**: Identify bottlenecks and errors in real-time
+- **Performance Monitoring**: Monitor latency, token usage, and success rates
+- **Feedback Collection**: Gather user feedback on AI responses
+
+### Setting up LangSmith Monitoring
+
+1. **Create a LangSmith account** at https://smith.langchain.com/
+2. **Generate an API key** in your LangSmith settings
+3. **Add the API key** to your secrets:
+   - Local: Add `LANGSMITH_API_KEY=ls_your_key_here` to `secrets.env`
+   - Streamlit Cloud: Add to the secrets management interface
+
+### Monitoring Features in Informa
+
+Once enabled, you can monitor:
+- **News Collection**: Track article collection from different sources
+- **Sentiment Analysis**: Monitor sentiment analysis performance
+- **Bias Detection**: Track bias detection accuracy
+- **Fact Checking**: Monitor fact-checking processes
+- **Chat Interactions**: Track user queries and responses
+
+### Accessing Your Monitoring Dashboard
+
+1. **Dashboard URL**: Automatically displayed in the Streamlit sidebar
+2. **Project**: `informa-news-analysis` (customizable in config)
+3. **Sessions**: Auto-generated with timestamps for each app run
+
+### Performance Tips
 2. **Streamlit Cloud Account**: Sign up at [share.streamlit.io](https://share.streamlit.io)
 3. **Hugging Face API Key**: Get a free API key from [huggingface.co](https://huggingface.co/settings/tokens)
 
@@ -87,6 +128,7 @@
    NEWSAPI_KEY = ""  # Optional
    REDDIT_CLIENT_ID = ""  # Optional
    REDDIT_CLIENT_SECRET = ""  # Optional
+   LANGSMITH_API_KEY = ""  # Optional - for workflow monitoring
    
    [configuration]
    debug_mode = false
@@ -108,6 +150,7 @@ If you prefer environment variables over secrets.toml, you can set them in Strea
    - `NEWSAPI_KEY`: Your NewsAPI key (optional)
    - `REDDIT_CLIENT_ID`: Your Reddit client ID (optional)
    - `REDDIT_CLIENT_SECRET`: Your Reddit client secret (optional)
+   - `LANGSMITH_API_KEY`: Your LangSmith API key (optional)
 
 ## Troubleshooting
 
@@ -142,7 +185,10 @@ If you prefer environment variables over secrets.toml, you can set them in Strea
   - Get it free at: https://huggingface.co/settings/tokens
   - Free tier includes generous usage limits
 
-### Optional (Free)
+### Optional (Free/Paid)
+- **LangSmith API**: Optional for workflow monitoring and debugging
+  - Get it at: https://smith.langchain.com/
+  - Free tier available with usage limits
 - **NewsAPI**: Enhances news collection (free tier: 1000 requests/day)
   - Get it at: https://newsapi.org/
 - **Reddit API**: Enables Reddit news collection

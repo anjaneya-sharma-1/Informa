@@ -25,7 +25,7 @@ class SentimentAnalyzerAgent:
             self.api_url = "https://api-inference.huggingface.co/models/cardiffnlp/twitter-roberta-base-sentiment"
         
         if not self.api_key:
-            logger.warning("No Hugging Face API key found. Sentiment analysis will use fallback methods.")
+            logger.warning("No Hugging Face API key found. Sentiment analysis will default to neutral (no keyword fallback).")
         
         # Label mapping for the model
         self.label_mapping = {
@@ -46,81 +46,31 @@ class SentimentAnalyzerAgent:
         return None
 
     async def analyze(self, text: str) -> Dict[str, Any]:
-        """Analyze sentiment of given text using Hugging Face Inference API with fallback methods."""
+        """Analyze sentiment strictly via Hugging Face model (no keyword fallback)."""
         try:
             self.last_run = datetime.now().isoformat()
-            
             if not text or not text.strip():
-                return {
-                    'label': 'neutral',
-                    'score': 0.0,
-                    'confidence': 0.0,
-                    'method': 'empty_text'
-                }
-            
+                return {'label': 'neutral', 'score': 0.0, 'confidence': 0.0, 'method': 'empty_text'}
+            if not self.api_key:
+                return {'label': 'neutral', 'score': 0.0, 'confidence': 0.0, 'method': 'no_api_key'}
             cleaned_text = self._preprocess_text(text)
-            
-            if self.api_key:
-                try:
-                    return await self._comprehensive_sentiment_analysis(cleaned_text)
-                except Exception as e:
-                    logger.warning(f"Hugging Face API call failed: {e}")
-                    return self._fallback_sentiment_analysis(cleaned_text)
-            else:
-                return self._fallback_sentiment_analysis(cleaned_text)
-                
+            api_result = self._huggingface_api_analysis(cleaned_text)
+            # Strip auxiliary fields, keep core
+            return {
+                'label': api_result.get('label', 'neutral'),
+                'score': api_result.get('score', 0.0),
+                'confidence': api_result.get('confidence', 0.0),
+                'method': 'huggingface_api',
+                'raw_api_result': api_result.get('raw_results', [])
+            }
         except Exception as e:
             self.last_error = str(e)
             logger.error(f"Error in sentiment analysis: {e}")
-            return {
-                'label': 'neutral',
-                'score': 0.0,
-                'confidence': 0.0,
-                'error': str(e),
-                'method': 'error_fallback'
-            }
+            return {'label': 'neutral', 'score': 0.0, 'confidence': 0.0, 'error': str(e), 'method': 'error'}
     
-    async def _comprehensive_sentiment_analysis(self, text: str) -> Dict[str, Any]:
-        """Comprehensive sentiment analysis using Hugging Face API"""
-        # Get primary sentiment from API
-        api_result = self._huggingface_api_analysis(text)
-        
-        # Enhance with additional analysis
-        keyword_sentiment = self._keyword_based_sentiment(text)
-        intensity_score = self._calculate_intensity(text)
-        
-        # Combine results
-        primary_label = api_result['label']
-        primary_confidence = api_result['confidence']
-        
-        # Adjust confidence based on keyword analysis agreement
-        if keyword_sentiment['label'] == primary_label:
-            adjusted_confidence = min(primary_confidence + 0.1, 1.0)
-        else:
-            adjusted_confidence = max(primary_confidence - 0.1, 0.0)
-        
-        return {
-            'label': primary_label,
-            'score': api_result['score'],
-            'confidence': adjusted_confidence,
-            'intensity': intensity_score,
-            'keyword_analysis': keyword_sentiment,
-            'method': 'comprehensive_huggingface_api',
-            'raw_api_result': api_result.get('raw_results', [])
-        }
+    # Removed comprehensive/keyword hybrid analysis; only direct HF API is used.
     
-    def _fallback_sentiment_analysis(self, text: str) -> Dict[str, Any]:
-        """Fallback sentiment analysis using keyword-based approach"""
-        keyword_result = self._keyword_based_sentiment(text)
-        intensity = self._calculate_intensity(text)
-        
-        return {
-            'label': keyword_result['label'],
-            'score': keyword_result['score'],
-            'confidence': keyword_result['confidence'],
-            'intensity': intensity,
-            'method': 'keyword_fallback'
-        }
+    # Removed keyword fallback sentiment analysis.
 
     def _huggingface_api_analysis(self, text: str) -> Dict[str, Any]:
         headers = {"Authorization": f"Bearer {self.api_key}"}
@@ -156,60 +106,9 @@ class SentimentAnalyzerAgent:
                 'raw': results
             }
 
-    def _keyword_based_sentiment(self, text: str) -> Dict[str, Any]:
-        """Keyword-based sentiment analysis as fallback"""
-        positive_words = [
-            'good', 'great', 'excellent', 'amazing', 'wonderful', 'fantastic', 'positive',
-            'happy', 'joy', 'success', 'achievement', 'progress', 'improvement', 'beneficial'
-        ]
-        
-        negative_words = [
-            'bad', 'terrible', 'awful', 'horrible', 'negative', 'sad', 'angry', 'hate',
-            'failure', 'problem', 'crisis', 'disaster', 'dangerous', 'harmful', 'devastating'
-        ]
-        
-        neutral_words = [
-            'okay', 'average', 'normal', 'standard', 'typical', 'regular', 'moderate'
-        ]
-        
-        text_lower = text.lower()
-        words = text_lower.split()
-        
-        positive_count = sum(1 for word in words if word in positive_words)
-        negative_count = sum(1 for word in words if word in negative_words)
-        neutral_count = sum(1 for word in words if word in neutral_words)
-        
-        total_sentiment_words = positive_count + negative_count + neutral_count
-        
-        if total_sentiment_words == 0:
-            return {'label': 'neutral', 'score': 0.0, 'confidence': 0.1}
-        
-        if positive_count > negative_count and positive_count > neutral_count:
-            confidence = positive_count / max(total_sentiment_words, 1)
-            return {'label': 'positive', 'score': confidence, 'confidence': confidence}
-        elif negative_count > positive_count and negative_count > neutral_count:
-            confidence = negative_count / max(total_sentiment_words, 1)
-            return {'label': 'negative', 'score': -confidence, 'confidence': confidence}
-        else:
-            confidence = max(neutral_count / max(total_sentiment_words, 1), 0.1)
-            return {'label': 'neutral', 'score': 0.0, 'confidence': confidence}
+    # Removed keyword-based sentiment function.
     
-    def _calculate_intensity(self, text: str) -> float:
-        """Calculate sentiment intensity based on text features"""
-        intensity_indicators = [
-            '!', '!!', '!!!', '?', '??', '???',
-            'very', 'extremely', 'incredibly', 'absolutely', 'completely',
-            'totally', 'entirely', 'utterly', 'really', 'truly'
-        ]
-        
-        text_lower = text.lower()
-        intensity_count = sum(text_lower.count(indicator) for indicator in intensity_indicators)
-        
-        # Normalize intensity score
-        max_intensity = 10  # Arbitrary max
-        intensity_score = min(intensity_count / max_intensity, 1.0)
-        
-        return intensity_score
+    # Removed intensity calculation (no longer used without keyword enhancements).
     
     def _preprocess_text(self, text: str) -> str:
         """Preprocess text for sentiment analysis"""

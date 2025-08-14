@@ -123,6 +123,9 @@ class VectorDatabase:
             # Prepare document text - ensure strings are properly handled
             title = str(article.get('title', '') or '').replace('\x00', '')
             content = str(article.get('content', '') or '').replace('\x00', '')
+            description = str(article.get('description', '') or '')
+            if not description and content:
+                description = content[:2000]
             document_text = f"{title} {content}"
             
             # Prepare metadata - ensure all values are properly stringified and cleaned
@@ -141,8 +144,8 @@ class VectorDatabase:
                 metadata.update({
                     'sentiment_label': sentiment.get('label', 'neutral'),
                     'sentiment_score': sentiment.get('score', 0.0),
-                    'bias_score': analysis.get('bias_score', 0.0),
-                    'credibility_score': analysis.get('credibility_score', 0.5)
+                    'bias_score': analysis.get('bias', {}).get('overall_score', analysis.get('bias_score', 0.0)),
+                    'credibility_score': analysis.get('credibility_score', analysis.get('fact_check', {}).get('credibility_score', 0.5))
                 })
             
             # Store in ChromaDB
@@ -151,6 +154,40 @@ class VectorDatabase:
                 metadatas=[metadata],
                 ids=[article['id']]
             )
+            
+            # Also persist minimal data to SQLite for keyword/embedding search used by chat
+            try:
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
+                
+                # Insert article (minimal fields)
+                cursor.execute('''
+                    INSERT OR REPLACE INTO articles 
+                    (id, title, description, url, source, published_at, topic, source_type, collected_at, content_hash)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    article['id'],
+                    title[:1000],
+                    description[:2000],
+                    str(article.get('url', '') or '')[:500],
+                    str(article.get('source', '') or '')[:200],
+                    str(article.get('published_at', '') or ''),
+                    str(article.get('topic', '') or '')[:100],
+                    str(article.get('source_type', '') or '')[:100],
+                    article.get('collected_at', datetime.now().isoformat()),
+                    hashlib.md5((title + description).encode('utf-8', errors='ignore')).hexdigest()
+                ))
+                
+                # Create keywords and fallback embedding
+                self._create_search_index(article['id'], {
+                    'title': title,
+                    'description': description
+                }, cursor)
+                
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                logger.warning(f"SQLite persistence warning: {e}")
             
             logger.debug(f"Stored article: {title[:50]}...")
             return True
@@ -256,12 +293,12 @@ class VectorDatabase:
         
         words = text.lower().split()
         
-        # Create a simple 100-dimensional vector
-        embedding = np.zeros(100)
+        # Create a 384-dimensional vector to align with MiniLM embeddings
+        embedding = np.zeros(384)
         
-        for i, word in enumerate(words[:50]):  # Limit to first 50 words
+        for i, word in enumerate(words[:100]):  # Limit to first 100 words
             # Simple hash-based approach
-            word_hash = hash(word) % 100
+            word_hash = hash(word) % 384
             embedding[word_hash] += 1.0 / (i + 1)  # Weight by position
         
         # Normalize
@@ -286,13 +323,20 @@ class VectorDatabase:
                 for article_id, embedding_json in rows:
                     try:
                         embedding = np.array(json.loads(embedding_json))
+                        # Ensure dimensionality match by padding/truncating
+                        if embedding.shape[0] != query_embedding.shape[0]:
+                            if embedding.shape[0] < query_embedding.shape[0]:
+                                pad = np.zeros(query_embedding.shape[0] - embedding.shape[0])
+                                embedding = np.concatenate([embedding, pad])
+                            else:
+                                embedding = embedding[:query_embedding.shape[0]]
                         # Cosine similarity
                         if np.linalg.norm(embedding) == 0 or np.linalg.norm(query_embedding) == 0:
                             sim = 0.0
                         else:
                             sim = float(np.dot(query_embedding, embedding) / (np.linalg.norm(query_embedding) * np.linalg.norm(embedding)))
                         similarities.append((article_id, sim))
-                    except Exception as e:
+                    except Exception:
                         continue
                 # Sort by similarity
                 similarities = sorted(similarities, key=lambda x: x[1], reverse=True)[:limit]

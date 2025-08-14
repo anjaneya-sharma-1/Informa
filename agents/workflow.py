@@ -13,8 +13,10 @@ from agents.news_collector import NewsCollectorAgent
 from agents.sentiment_analyzer import SentimentAnalyzerAgent
 from agents.bias_detector import BiasDetectorAgent
 from agents.fact_checker import FactCheckerAgent
+from agents.fact_check_verdict import FactCheckVerdictAgent
 from utils.database import VectorDatabase
 from utils.config import AppConfig
+from utils.langsmith_monitor import setup_langsmith_monitoring
 
 logger = logging.getLogger(__name__)
 
@@ -45,47 +47,54 @@ class WorkflowState:
 
 class NewsWorkflow:
     """Multi-agent news analysis workflow using LangGraph"""
-    
+
     def __init__(self, config, database: VectorDatabase):
         self.config = config
         self.database = database
-        
-        # Initialize agents
+
+        # Initialize LangSmith monitoring
+        self.langsmith_monitor = setup_langsmith_monitoring(config)
+
+        # Initialize agents (pass config so they can use API keys from secrets/env)
         self.news_collector = NewsCollectorAgent(config)
-        self.sentiment_analyzer = SentimentAnalyzerAgent()
-        self.bias_detector = BiasDetectorAgent()
+        self.sentiment_analyzer = SentimentAnalyzerAgent(config)
+        self.bias_detector = BiasDetectorAgent(config)
+        # Legacy credibility fact checker (kept for reference; node removed from active graph)
         self.fact_checker = FactCheckerAgent(config)
-        
+        # New lightweight external verdict agent
+        self.fact_check_verdict_agent = FactCheckVerdictAgent(config)
+        # Enhanced fact checker for better verdicts
+        from agents.enhanced_fact_checker import EnhancedFactChecker
+        self.enhanced_fact_checker = EnhancedFactChecker(config)
+
         # Build workflow graph
         self.workflow = self._build_workflow()
-    
+
     def _build_workflow(self) -> StateGraph:
-        """Build the LangGraph workflow with proper agent orchestration"""
-        
-        # Define the workflow graph with dynamic state management
+        """Build and compile the LangGraph workflow"""
         workflow = StateGraph(dict)
-        
-        # Add specialized agent nodes
+
+        # Nodes
         workflow.add_node("topic_selection", self._topic_selection_node)
         workflow.add_node("news_collection", self._news_collection_node)
         workflow.add_node("sentiment_analysis", self._sentiment_analysis_node)
         workflow.add_node("bias_detection", self._bias_detection_node)
+        workflow.add_node("fact_check_verdict", self._fact_check_verdict_node)
         workflow.add_node("content_synthesis", self._content_synthesis_node)
         workflow.add_node("vector_storage", self._vector_storage_node)
         workflow.add_node("completion", self._completion_node)
-        
-        # Define the workflow edges for proper orchestration
+
+        # Edges
         workflow.add_edge("topic_selection", "news_collection")
         workflow.add_edge("news_collection", "sentiment_analysis")
         workflow.add_edge("sentiment_analysis", "bias_detection")
-        workflow.add_edge("bias_detection", "content_synthesis")
+        workflow.add_edge("bias_detection", "fact_check_verdict")
+        workflow.add_edge("fact_check_verdict", "content_synthesis")
         workflow.add_edge("content_synthesis", "vector_storage")
         workflow.add_edge("vector_storage", "completion")
         workflow.add_edge("completion", END)
-        
-        # Set entry point
+
         workflow.set_entry_point("topic_selection")
-        
         return workflow.compile()
     
     async def execute_workflow(
@@ -114,8 +123,21 @@ class NewsWorkflow:
         try:
             logger.info(f"Starting workflow for topics: {topics}, sources: {sources}")
             
+            # Log workflow start in LangSmith
+            run_id = self.langsmith_monitor.log_workflow_start(
+                workflow_type="news_analysis",
+                inputs=initial_state
+            )
+            
             # Execute workflow
             final_state = await self.workflow.ainvoke(initial_state)
+            
+            # Log workflow completion in LangSmith
+            self.langsmith_monitor.log_workflow_end(
+                workflow_type="news_analysis",
+                outputs=final_state,
+                run_id=run_id
+            )
             
             logger.info(f"Workflow completed successfully. Processed {len(final_state.get('stored_articles', []))} articles")
             return final_state.get("stored_articles", [])
@@ -139,16 +161,9 @@ class NewsWorkflow:
                 if isinstance(topic, str) and topic.strip():
                     valid_topics.append(topic.strip().lower())
             
-            valid_sources = []
-            for source in state["sources"]:
-                if isinstance(source, str) and source.strip():
-                    valid_sources.append(source.strip().lower())
-            
+            valid_sources = []  # sources are ignored by NewsAPI-only collector
             if not valid_topics:
                 valid_topics = ["technology"]  # Default topic
-            
-            if not valid_sources:
-                valid_sources = ["bbc"]  # Default source
             
             state["topics"] = valid_topics
             state["sources"] = valid_sources
@@ -171,11 +186,24 @@ class NewsWorkflow:
             state["current_step"] = "news_collection"
             state["progress"] = 30
             
+            # Log agent execution start
+            agent_inputs = {"topics": state["topics"], "max_articles": state["max_articles"]}
+            
             # Collect articles using news collector agent
             articles = await self.news_collector.collect_news(
                 topics=state["topics"],
-                sources=state["sources"],
+                sources=[],  # ignored in collector
                 max_articles=state["max_articles"]
+            )
+            
+            agent_outputs = {"articles": articles}
+            
+            # Log agent execution in LangSmith
+            self.langsmith_monitor.log_agent_execution(
+                agent_name="NewsCollectorAgent",
+                inputs=agent_inputs,
+                outputs=agent_outputs,
+                workflow_type="news_analysis"
             )
             
             state["collected_articles"] = articles
@@ -193,7 +221,7 @@ class NewsWorkflow:
         """Node for sentiment analysis using specialized agent"""
         try:
             if state.get("progress_callback"):
-                state["progress_callback"]("� Analyzing sentiment...", 50)
+                state["progress_callback"]("🧠 Analyzing sentiment...", 50)
             
             state["current_step"] = "sentiment_analysis"
             state["progress"] = 50
@@ -208,7 +236,7 @@ class NewsWorkflow:
                     # Update progress for individual articles
                     if state.get("progress_callback") and total_articles > 0:
                         progress = 50 + (15 * i / total_articles)
-                        state["progress_callback"](f"� Analyzing sentiment {i+1}/{total_articles}...", int(progress))
+                        state["progress_callback"](f"🧠 Analyzing sentiment {i+1}/{total_articles}...", int(progress))
                     
                     # Perform sentiment analysis
                     title_content = f"{article.get('title', '')} {article.get('content', '')}"
@@ -231,6 +259,14 @@ class NewsWorkflow:
                     # Add article without sentiment analysis
                     analyzed_articles.append(article)
                     continue
+            
+            # Log agent execution in LangSmith
+            self.langsmith_monitor.log_agent_execution(
+                agent_name="SentimentAnalyzerAgent",
+                inputs={"articles_count": len(articles)},
+                outputs={"analyzed_count": len(analyzed_articles)},
+                workflow_type="news_analysis"
+            )
             
             state["sentiment_analyzed_articles"] = analyzed_articles
             
@@ -284,6 +320,14 @@ class NewsWorkflow:
                     analyzed_articles.append(article)
                     continue
             
+            # Log agent execution in LangSmith
+            self.langsmith_monitor.log_agent_execution(
+                agent_name="BiasDetectorAgent",
+                inputs={"articles_count": len(articles)},
+                outputs={"analyzed_count": len(analyzed_articles)},
+                workflow_type="news_analysis"
+            )
+            
             state["fully_analyzed_articles"] = analyzed_articles
             
             logger.info(f"Bias detection complete for {len(analyzed_articles)} articles")
@@ -292,6 +336,129 @@ class NewsWorkflow:
         except Exception as e:
             error_msg = f"Bias detection error: {str(e)}"
             state["errors"].append(error_msg)
+            logger.error(error_msg)
+            return state
+
+    async def _credibility_analysis_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Node for credibility analysis using the FactCheckerAgent."""
+        try:
+            if state.get("progress_callback"):
+                state["progress_callback"]("🔎 Assessing credibility...", 75)
+
+            state["current_step"] = "credibility_analysis"
+            state["progress"] = 75
+
+            articles = state.get("fully_analyzed_articles", [])
+            analyzed_articles = []
+
+            total_articles = len(articles)
+
+            for i, article in enumerate(articles):
+                try:
+                    if state.get("progress_callback") and total_articles > 0:
+                        progress = 75 + (5 * i / max(total_articles, 1))
+                        state["progress_callback"](f"🔎 Credibility {i+1}/{total_articles}...", int(progress))
+
+                    text = article.get("content") or article.get("title", "")
+                    url = article.get("url")
+                    # Compute credibility via FactCheckerAgent
+                    result = await self.fact_checker.check_article(text=text, url=url)
+
+                    article_copy = article.copy()
+                    article_copy.update({
+                        "credibility_score": result.get("credibility_score", 0.5),
+                        "credibility_method": result.get("method", ""),
+                        "credibility_details": {
+                            "url_credibility": result.get("url_credibility"),
+                            "components": result.get("credibility_components", {}),
+                            "sources_checked": result.get("sources_checked", [])
+                        }
+                    })
+
+                    analyzed_articles.append(article_copy)
+
+                except Exception as e:
+                    logger.warning(f"Error computing credibility for article {i}: {e}")
+                    analyzed_articles.append(article)
+                    continue
+
+            # Log agent execution in LangSmith
+            self.langsmith_monitor.log_agent_execution(
+                agent_name="FactCheckerAgent",
+                inputs={"articles_count": len(articles)},
+                outputs={"analyzed_count": len(analyzed_articles)},
+                workflow_type="news_analysis"
+            )
+
+            state["credibility_analyzed_articles"] = analyzed_articles
+
+            logger.info(f"Credibility analysis complete for {len(analyzed_articles)} articles")
+            return state
+
+        except Exception as e:
+            error_msg = f"Credibility analysis error: {str(e)}"
+            state["errors"].append(error_msg)
+            logger.error(error_msg)
+            return state
+
+    async def _fact_check_verdict_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Node to fetch external fact-check verdicts for each article (lightweight)."""
+        try:
+            if state.get("progress_callback"):
+                state["progress_callback"]("🧾 Fetching fact-check verdicts...", 78)
+
+            articles = state.get("credibility_analyzed_articles") or state.get("fully_analyzed_articles", [])
+            processed = []
+            total = len(articles)
+            for i, article in enumerate(articles):
+                try:
+                    if state.get("progress_callback") and total > 0:
+                        pct = 78 + int(2 * (i / max(total,1)))
+                        state["progress_callback"](f"🧾 Verdict {i+1}/{total}...", pct)
+                    text = article.get('content') or article.get('title', '')
+                    
+                    # Use enhanced fact checking if enabled, otherwise use original
+                    if self.config.feature_flags.get('enable_enhanced_fact_checking', True):
+                        try:
+                            enhanced_result = await self.enhanced_fact_checker.verify_claims(text)
+                            copy = article.copy()
+                            copy['fact_check_verdict'] = enhanced_result.get('overall_verdict')
+                            copy['fact_check_claims'] = enhanced_result.get('claims', [])
+                            copy['fact_check_confidence'] = enhanced_result.get('confidence', 0.0)
+                            copy['fact_check_methods'] = enhanced_result.get('verification_methods', [])
+                            processed.append(copy)
+                        except Exception as e:
+                            # Fallback to original fact checker
+                            logger.debug(f"Enhanced fact checking failed, using fallback: {e}")
+                            verdict_result = await self.fact_check_verdict_agent.get_verdicts_for_text(text)
+                            copy = article.copy()
+                            copy['fact_check_verdict'] = verdict_result.get('overall_verdict')
+                            copy['fact_check_claims'] = verdict_result.get('claims', [])
+                            processed.append(copy)
+                    else:
+                        # Use original fact checker
+                        verdict_result = await self.fact_check_verdict_agent.get_verdicts_for_text(text)
+                        copy = article.copy()
+                        copy['fact_check_verdict'] = verdict_result.get('overall_verdict')
+                        copy['fact_check_claims'] = verdict_result.get('claims', [])
+                        processed.append(copy)
+                except Exception as ie:
+                    logger.debug(f"Verdict fetch failed for article {i}: {ie}")
+                    processed.append(article)
+                    continue
+            state['factcheck_verdict_articles'] = processed
+            # Log agent execution
+            self.langsmith_monitor.log_agent_execution(
+                agent_name="FactCheckVerdictAgent",
+                inputs={"articles_count": len(articles)},
+                outputs={"processed": len(processed)},
+                workflow_type="news_analysis"
+            )
+            logger.info(f"Fact-check verdicts added for {len(processed)} articles")
+            return state
+        except Exception as e:
+            error_msg = f"Fact check verdict error: {str(e)}"
+            state['errors'].append(error_msg)
             logger.error(error_msg)
             return state
     
@@ -304,7 +471,8 @@ class NewsWorkflow:
             state["current_step"] = "content_synthesis"
             state["progress"] = 80
             
-            articles = state.get("fully_analyzed_articles", [])
+            # Prefer articles with credibility computed; fall back if missing
+            articles = state.get("factcheck_verdict_articles") or state.get("credibility_analyzed_articles") or state.get("fully_analyzed_articles", [])
             synthesized_articles = []
             
             for article in articles:
@@ -490,6 +658,10 @@ class ChatWorkflow:
     def __init__(self, config, database: VectorDatabase):
         self.config = config
         self.database = database
+        
+        # Initialize LangSmith monitoring
+        self.langsmith_monitor = setup_langsmith_monitoring(config)
+        
         self.workflow = self._build_chat_workflow()
     
     def _build_chat_workflow(self) -> StateGraph:
@@ -524,7 +696,21 @@ class ChatWorkflow:
         }
         
         try:
+            # Log chat workflow start
+            run_id = self.langsmith_monitor.log_workflow_start(
+                workflow_type="chat_query",
+                inputs=initial_state
+            )
+            
             final_state = await self.workflow.ainvoke(initial_state)
+            
+            # Log chat workflow completion
+            self.langsmith_monitor.log_workflow_end(
+                workflow_type="chat_query",
+                outputs=final_state,
+                run_id=run_id
+            )
+            
             return final_state
             
         except Exception as e:

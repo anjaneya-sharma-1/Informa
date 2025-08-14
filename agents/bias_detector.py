@@ -17,14 +17,18 @@ class BiasDetectorAgent:
         if config:
             self.api_key = config.get_huggingface_key()
             models = config.get_huggingface_models()
-            self.api_url = f"https://api-inference.huggingface.co/models/{models['bias']}"
+            hf_base = (config.get_api_endpoints().get('huggingface_inference') if hasattr(config, 'get_api_endpoints') else 'https://api-inference.huggingface.co/models')
+            # Use MNLI zero-shot for political leaning; toxicity optional
+            self.zero_shot_url = f"{hf_base}/{models.get('political_bias', 'facebook/bart-large-mnli')}"
+            self.toxicity_url = f"{hf_base}/{models.get('toxicity', 'unitary/toxic-bert')}"
         else:
             # Fallback to environment/secrets file
             self.api_key = self._load_api_key_from_secrets()
-            self.api_url = "https://api-inference.huggingface.co/models/unitary/toxic-bert"
+            self.zero_shot_url = "https://api-inference.huggingface.co/models/facebook/bart-large-mnli"
+            self.toxicity_url = "https://api-inference.huggingface.co/models/unitary/toxic-bert"
         
         if not self.api_key:
-            logger.warning("No Hugging Face API key found. Bias detection will use fallback methods.")
+            logger.warning("No Hugging Face API key found. Bias detection will return neutral placeholder (fallback removed).")
     
     def _load_api_key_from_secrets(self) -> str:
         """Load API key from secrets file"""
@@ -36,199 +40,124 @@ class BiasDetectorAgent:
         except Exception as e:
             logger.warning(f"Could not load Hugging Face API key from secrets: {e}")
         return None
+
     async def analyze_bias(self, text: str, source: str = None) -> Dict[str, Any]:
-        """Bias analysis using Hugging Face Inference API with multiple bias detection approaches."""
+        """Bias analysis using zero-shot political leaning plus toxicity and emotion signals."""
         self.last_run = datetime.now().isoformat()
         
         if not text or not text.strip():
-            return {
-                'overall_bias_score': 0.0,
-                'bias_breakdown': {},
-                'method': 'empty_text'
-            }
-        
+            return {'overall_bias_score': 0.0, 'bias_breakdown': {}, 'method': 'empty_text'}
+        if not self.api_key:
+            return {'overall_bias_score': 0.0, 'bias_breakdown': {}, 'method': 'no_api_key'}
         cleaned_text = self._preprocess_text(text)
-        
-        if self.api_key:
-            try:
-                # Use multiple bias detection approaches
-                results = await self._comprehensive_bias_analysis(cleaned_text, source)
-                return results
-            except Exception as e:
-                logger.warning(f"Hugging Face API call failed: {e}")
-                return self._fallback_bias_analysis(cleaned_text, source)
-        else:
-            return self._fallback_bias_analysis(cleaned_text, source)
-    
-    async def _comprehensive_bias_analysis(self, text: str, source: str = None) -> Dict[str, Any]:
-        """Comprehensive bias analysis using multiple Hugging Face models"""
-        results = {}
-        
-        # 1. Toxicity detection
-        toxicity_result = self._huggingface_api_bias(text)
-        results['toxicity'] = self._parse_toxicity_result(toxicity_result)
-        
-        # 2. Political bias indicators (using sentiment as proxy)
-        political_bias = self._detect_political_bias_keywords(text)
-        results['political_bias'] = political_bias
-        
-        # 3. Emotional manipulation detection
-        emotional_bias = self._detect_emotional_manipulation(text)
-        results['emotional_bias'] = emotional_bias
-        
-        # 4. Source credibility factor
-        source_factor = self._get_source_credibility_factor(source)
-        results['source_credibility'] = source_factor
-        
-        # Calculate overall bias score
-        overall_score = self._calculate_overall_bias_score(results)
-        
-        return {
-            'overall_bias_score': overall_score,
-            'bias_breakdown': results,
-            'method': 'comprehensive_huggingface_api',
-            'analyzed_at': self.last_run
-        }
-    
-    def _fallback_bias_analysis(self, text: str, source: str = None) -> Dict[str, Any]:
-        """Fallback bias analysis using keyword-based detection"""
-        bias_indicators = self._detect_bias_keywords(text)
-        source_factor = self._get_source_credibility_factor(source)
-        
-        # Simple scoring based on keyword presence
-        keyword_score = min(len(bias_indicators) * 0.2, 1.0)
-        overall_score = (keyword_score + (1.0 - source_factor)) / 2
-        
-        return {
-            'overall_bias_score': overall_score,
-            'bias_breakdown': {
-                'bias_keywords': bias_indicators,
-                'source_credibility': source_factor
-            },
-            'method': 'keyword_fallback',
-            'analyzed_at': self.last_run
-        }
-
-    def _huggingface_api_bias(self, text: str):
-        headers = {"Authorization": f"Bearer {self.api_key}"}
-        response = requests.post(self.api_url, headers=headers, json={"inputs": text})
-        response.raise_for_status()
-        return response.json()
+        try:
+            political = self._zero_shot_political(cleaned_text)
+            toxicity = self._toxicity(cleaned_text)
+            emotional = self._detect_emotional_manipulation(cleaned_text)  # still used auxiliary
+            source_factor = self._get_source_credibility_factor(source)
+            overall = self._compute_bias_score(political, toxicity, emotional, source_factor)
+            return {
+                'overall_bias_score': overall,
+                'bias_breakdown': {
+                    'political': political,
+                    'toxicity': toxicity,
+                    'emotional': emotional,
+                    'source_credibility': source_factor
+                },
+                'method': 'zero_shot_political_bias',
+                'analyzed_at': self.last_run
+            }
+        except Exception as e:
+            logger.error(f"Bias detection failed irrecoverably: {e}")
+            return {'overall_bias_score': 0.0, 'bias_breakdown': {}, 'method': 'error', 'error': str(e)}
 
     def _preprocess_text(self, text: str) -> str:
         import re
-        text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*$\$,]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '', text)
-        text = ' '.join(text.split())
-        return text
-    
-    def _parse_toxicity_result(self, result) -> Dict[str, float]:
-        """Parse toxicity detection result from Hugging Face API"""
-        if isinstance(result, list) and len(result) > 0 and isinstance(result[0], list):
-            scores = {}
-            for label_data in result[0]:
-                label = label_data.get('label', '').lower()
-                score = label_data.get('score', 0.0)
+        text = re.sub(r'http[s]?://\S+', '', text)
+        return ' '.join(text.split())
+
+    def _zero_shot_political(self, text: str) -> Dict[str, Any]:
+        """Classify political leaning via zero-shot labels."""
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        labels = ["left-leaning", "right-leaning", "centrist"]
+        payload = {"inputs": text[:800], "parameters": {"candidate_labels": labels}}
+        resp = requests.post(self.zero_shot_url, headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, dict) and 'labels' in data and 'scores' in data:
+            scores = dict(zip([l.lower() for l in data['labels']], data['scores']))
+            # Normalize and expose lean + strength
+            lean = max(scores, key=scores.get)
+            strength = float(scores[lean])
+            return {"lean": lean, "strength": strength, "scores": scores}
+        # Some HF servers return list
+        if isinstance(data, list) and data and isinstance(data[0], dict) and 'labels' in data[0]:
+            scores = dict(zip([l.lower() for l in data[0]['labels']], data[0]['scores']))
+            lean = max(scores, key=scores.get)
+            strength = float(scores[lean])
+            return {"lean": lean, "strength": strength, "scores": scores}
+        return {"lean": "neutral", "strength": 0.0, "scores": {}}
+
+    def _toxicity(self, text: str) -> Dict[str, float]:
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        resp = requests.post(self.toxicity_url, headers=headers, json={"inputs": text[:800]}, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        scores = {}
+        if isinstance(data, list) and data and isinstance(data[0], list):
+            for item in data[0]:
+                label = item.get('label', '').lower()
+                score = item.get('score', 0.0)
                 scores[label] = score
-            return scores
-        return {'toxic': 0.0}
-    
-    def _detect_political_bias_keywords(self, text: str) -> Dict[str, Any]:
-        """Detect political bias indicators in text"""
-        left_keywords = ['progressive', 'liberal', 'social justice', 'equality', 'diversity', 'climate change']
-        right_keywords = ['conservative', 'traditional', 'law and order', 'national security', 'free market']
-        center_keywords = ['moderate', 'bipartisan', 'compromise', 'balanced']
-        
-        text_lower = text.lower()
-        
-        left_count = sum(1 for word in left_keywords if word in text_lower)
-        right_count = sum(1 for word in right_keywords if word in text_lower)
-        center_count = sum(1 for word in center_keywords if word in text_lower)
-        
-        total_political = left_count + right_count + center_count
-        
-        if total_political == 0:
-            return {'lean': 'neutral', 'strength': 0.0}
-        
-        if left_count > right_count and left_count > center_count:
-            return {'lean': 'left', 'strength': left_count / max(total_political, 1)}
-        elif right_count > left_count and right_count > center_count:
-            return {'lean': 'right', 'strength': right_count / max(total_political, 1)}
-        else:
-            return {'lean': 'center', 'strength': center_count / max(total_political, 1)}
-    
+        return scores or {"toxic": 0.0}
+
     def _detect_emotional_manipulation(self, text: str) -> Dict[str, Any]:
-        """Detect emotional manipulation indicators"""
         emotion_keywords = {
             'fear': ['terrifying', 'shocking', 'alarming', 'devastating', 'crisis', 'emergency'],
             'anger': ['outrageous', 'disgusting', 'infuriating', 'scandal', 'betrayal'],
             'excitement': ['amazing', 'incredible', 'revolutionary', 'breakthrough', 'miracle'],
             'urgency': ['urgent', 'immediate', 'now', 'quickly', 'limited time']
         }
-        
         text_lower = text.lower()
-        emotion_scores = {}
-        
-        for emotion, keywords in emotion_keywords.items():
-            count = sum(1 for word in keywords if word in text_lower)
-            emotion_scores[emotion] = count
-        
-        total_emotional = sum(emotion_scores.values())
-        manipulation_score = min(total_emotional * 0.1, 1.0)
-        
-        return {
-            'manipulation_score': manipulation_score,
-            'emotion_breakdown': emotion_scores
-        }
-    
+        emotion_scores = {k: sum(1 for w in v if w in text_lower) for k, v in emotion_keywords.items()}
+        total = sum(emotion_scores.values())
+        manipulation = min(total * 0.1, 1.0)
+        return {'manipulation_score': manipulation, 'emotion_breakdown': emotion_scores}
+
     def _get_source_credibility_factor(self, source: str) -> float:
-        """Get source credibility factor (higher = more credible)"""
         if not source:
-            return 0.5  # Unknown source
-        
+            return 0.5
         source = source.lower()
-        
-        # High credibility sources
-        high_credibility = ['reuters', 'ap', 'bbc', 'npr', 'pbs', 'bloomberg']
-        if any(cred in source for cred in high_credibility):
+        high = ['reuters', 'ap', 'bbc', 'npr', 'pbs', 'bloomberg']
+        if any(s in source for s in high):
             return 0.9
-        
-        # Medium credibility sources
-        medium_credibility = ['cnn', 'fox', 'nbc', 'abc', 'cbs', 'washington post', 'wall street journal']
-        if any(cred in source for cred in medium_credibility):
+        medium = ['cnn', 'fox', 'nbc', 'abc', 'cbs', 'washington post', 'wall street journal']
+        if any(s in source for s in medium):
             return 0.7
-        
-        # Lower credibility indicators
-        low_credibility = ['blog', 'opinion', 'editorial', 'social media']
-        if any(low in source for low in low_credibility):
+        low = ['blog', 'opinion', 'editorial', 'social media']
+        if any(s in source for s in low):
             return 0.3
-        
-        return 0.5  # Default
-    
-    def _detect_bias_keywords(self, text: str) -> List[str]:
-        """Detect bias keywords for fallback analysis"""
-        bias_keywords = [
-            'allegedly', 'claims', 'supposedly', 'reportedly', 'sources say',
-            'insiders reveal', 'shocking truth', 'exposed', 'cover-up',
-            'conspiracy', 'mainstream media', 'fake news', 'propaganda'
-        ]
-        
-        text_lower = text.lower()
-        found_keywords = [keyword for keyword in bias_keywords if keyword in text_lower]
-        return found_keywords
-    
-    def _calculate_overall_bias_score(self, results: Dict[str, Any]) -> float:
-        """Calculate overall bias score from multiple factors"""
-        toxicity_score = results.get('toxicity', {}).get('toxic', 0.0)
-        political_strength = results.get('political_bias', {}).get('strength', 0.0)
-        emotional_score = results.get('emotional_bias', {}).get('manipulation_score', 0.0)
-        source_credibility = results.get('source_credibility', 0.5)
-        
-        # Weighted combination
-        bias_score = (
-            toxicity_score * 0.3 +
-            political_strength * 0.2 +
-            emotional_score * 0.3 +
-            (1.0 - source_credibility) * 0.2
+        return 0.5
+
+    def _compute_bias_score(self, political: Dict[str, Any], toxicity: Dict[str, float], emotional: Dict[str, Any], source_factor: float) -> float:
+        pol_strength = float(political.get('strength', 0.0))
+        # Treat stronger left/right than center as more biased; center lowers score
+        lean = political.get('lean', 'neutral')
+        if 'left' in lean or 'right' in lean:
+            political_component = pol_strength
+        elif 'centrist' in lean:
+            political_component = max(0.0, 0.5 - pol_strength)  # strong centrist lowers bias
+        else:
+            political_component = 0.0
+        toxicity_component = max(toxicity.get('toxic', 0.0), toxicity.get('toxicity', 0.0))
+        emotional_component = float(emotional.get('manipulation_score', 0.0))
+        source_component = (1.0 - source_factor)  # less credible source => more bias
+        score = (
+            political_component * 0.45 +
+            toxicity_component * 0.2 +
+            emotional_component * 0.2 +
+            source_component * 0.15
         )
-        
-        return min(bias_score, 1.0)
+        return min(1.0, max(0.0, score))
+
+    # Removed keyword fallback bias analysis.

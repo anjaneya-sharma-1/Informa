@@ -114,6 +114,21 @@ The system uses multiple AI agents working together:
 - **ML Models**: Hugging Face Transformers
 - **Vector Database**: ChromaDB
 - **News Sources**: Free APIs and web scraping
+- **Monitoring**: LangSmith (optional) for workflow tracking and debugging
+
+## Monitoring & Debugging
+
+**LangSmith Integration** (Optional):
+- Track multi-agent workflow execution in real-time
+- Debug issues with sentiment analysis, bias detection, and fact-checking
+- Monitor performance metrics and identify bottlenecks
+- View detailed traces of each agent's decision-making process
+- Access monitoring dashboard directly from the Streamlit sidebar
+
+To enable monitoring:
+1. Get a free LangSmith API key from [smith.langchain.com](https://smith.langchain.com/)
+2. Add `LANGSMITH_API_KEY` to your secrets configuration
+3. Monitor your workflows at the dashboard URL shown in the sidebar
 
 ## Clean & Simple Design
 
