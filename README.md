@@ -16,63 +16,17 @@
 - **No Quantifications**: Results are descriptive, not numerical
 - **Comprehensive Analysis**: Detailed breakdown of the text
 
-## Setup Instructions
+## Quick Start
 
-1. **Create and activate a virtual environment**:
-   ```bash
-   python -m venv env
-   # On Windows
-   env\Scripts\activate
-   # On macOS/Linux
-   source env/bin/activate
-   ```
-
-2. **Install Dependencies**:
+1. **Install Dependencies**:
    ```bash
    pip install -r requirements.txt
    ```
 
-3. **Set up API Keys**:
-   
-   **For Local Development:**
-   Copy the template and add your API keys:
-   ```bash
-   cp secrets.env.template secrets.env
-   ```
-   Then edit `secrets.env` with your actual API keys:
-   ```
-   HF_API_KEY=your_huggingface_api_key
-   NEWSAPI_KEY=your_newsapi_key  # Optional
-   ```
-   
-   **For Streamlit Cloud Deployment:**
-   See [DEPLOYMENT.md](DEPLOYMENT.md) for detailed deployment instructions.
-   
-   - Get a free Hugging Face API key from [Hugging Face](https://huggingface.co/settings/tokens)
-   - Get a free NewsAPI key from [NewsAPI](https://newsapi.org/) (optional)
-
-4. **Initialize ChromaDB**:
-   ChromaDB will be automatically initialized the first time you run the application.
-   The database files will be stored in the `chroma_db` directory.
-
-5. **Run the Application**:
+2. **Run the Application**:
    ```bash
    streamlit run app.py
    ```
-
-## LangGraph Configuration
-
-The application uses LangGraph for orchestrating multiple specialized agents:
-
-- **Topic Selector Agent**: Determines relevant topics based on user queries
-- **News Collector Agent**: Fetches articles from free sources like BBC, Reuters, etc.
-- **Sentiment Analysis Agent**: Classifies article sentiment using Hugging Face models
-- **Bias Detection Agent**: Detects political and other biases in articles
-- **RAG Retrieval Agent**: Retrieves relevant articles from ChromaDB
-- **Chat Agent**: Provides natural language responses to user queries
-- **Fact Checker Agent**: Verifies claims using multiple sources
-
-The workflow is defined in `agents/workflow.py` and uses LangGraph's `StateGraph` for coordinating these agents.
 
 3. **Configure Settings** (in sidebar):
    - Select your preferred news topics
@@ -114,21 +68,6 @@ The system uses multiple AI agents working together:
 - **ML Models**: Hugging Face Transformers
 - **Vector Database**: ChromaDB
 - **News Sources**: Free APIs and web scraping
-- **Monitoring**: LangSmith (optional) for workflow tracking and debugging
-
-## Monitoring & Debugging
-
-**LangSmith Integration** (Optional):
-- Track multi-agent workflow execution in real-time
-- Debug issues with sentiment analysis, bias detection, and fact-checking
-- Monitor performance metrics and identify bottlenecks
-- View detailed traces of each agent's decision-making process
-- Access monitoring dashboard directly from the Streamlit sidebar
-
-To enable monitoring:
-1. Get a free LangSmith API key from [smith.langchain.com](https://smith.langchain.com/)
-2. Add `LANGSMITH_API_KEY` to your secrets configuration
-3. Monitor your workflows at the dashboard URL shown in the sidebar
 
 ## Clean & Simple Design
 
@@ -137,54 +76,6 @@ To enable monitoring:
 - **Natural language**: All responses in plain English
 - **No complex metrics**: Focus on understanding, not numbers
 - **Intuitive workflow**: Fetch news, then chat about it
-
-## System Architecture
-
-Informa is built using a multi-agent architecture with LangGraph orchestration:
-
-```
-┌─────────────────────────┐
-│     Streamlit UI        │
-└───────────┬─────────────┘
-            │
-┌───────────▼─────────────┐       ┌────────────────────┐
-│     Agent Orchestrator  │◄─────►│    ChromaDB        │
-│     (LangGraph)         │       │  (Vector Storage)  │
-└───────────┬─────────────┘       └────────────────────┘
-            │
-┌───────────┴────────────────────────────┐
-│                                        │
-▼                                        ▼
-┌─────────────────┐   ┌─────────────┐   ┌─────────────────┐
-│  News Agents    │   │ Chat Agent  │   │  Fact Checking  │
-│  - Collection   │   │ - RAG       │   │    Agents       │
-│  - Analysis     │   │ - Responses │   │  - Verification │
-└─────────────────┘   └─────────────┘   └─────────────────┘
-        │                   │                    │
-        ▼                   ▼                    ▼
-┌──────────────────────────────────────────────────────┐
-│               Hugging Face Inference API             │
-└──────────────────────────────────────────────────────┘
-```
-
-### Folder Structure
-
-```
-informa/
-├── agents/             # Specialized agent modules
-│   ├── bias_detector.py
-│   ├── chat_agent.py
-│   ├── fact_checker.py
-│   ├── news_collector.py
-│   ├── sentiment_analyzer.py
-│   └── workflow.py     # LangGraph orchestration
-├── utils/
-│   ├── config.py       # Dynamic configuration
-│   └── database.py     # ChromaDB integration
-├── app.py              # Streamlit application
-├── requirements.txt    # Dependencies
-└── secrets.env         # API keys (not committed)
-```
 
 ---
 

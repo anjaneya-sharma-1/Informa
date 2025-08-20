@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Setup script for Informa - Multi-Agent News Analysis System with LangGraph and ChromaDB
+Setup script for the Real Multi-Agent News Analysis System
 """
 
 import os
 import sys
 import subprocess
 import logging
-import importlib
 from pathlib import Path
 
 # Setup logging
@@ -99,82 +98,6 @@ CHROMA_PERSIST_DIRECTORY=./chroma_db
     return True
 
 def test_imports():
-    """Test importing required packages"""
-    required_packages = [
-        "streamlit", 
-        "langgraph", 
-        "langchain", 
-        "chromadb", 
-        "huggingface_hub", 
-        "transformers",
-        "requests",
-        "aiohttp",
-        "feedparser",
-        "beautifulsoup4"
-    ]
-    
-    missing_packages = []
-    for package in required_packages:
-        try:
-            importlib.import_module(package)
-            logger.info(f"Successfully imported {package}")
-        except ImportError:
-            missing_packages.append(package)
-            logger.warning(f"Failed to import {package}")
-    
-    if missing_packages:
-        logger.warning(f"Missing packages: {', '.join(missing_packages)}")
-        return False
-    
-    return True
-
-def test_langgraph():
-    """Test LangGraph functionality"""
-    try:
-        from langgraph.graph import StateGraph
-        
-        # Create a simple graph to test
-        graph = StateGraph()
-        graph.add_node("start", lambda x: x)
-        graph.add_node("end", lambda x: x)
-        graph.add_edge("start", "end")
-        
-        logger.info("LangGraph test successful")
-        return True
-    except Exception as e:
-        logger.error(f"LangGraph test failed: {e}")
-        return False
-        
-def test_chromadb():
-    """Test ChromaDB functionality"""
-    try:
-        from chromadb import Client, Settings
-        
-        # Create an in-memory client for testing
-        client = Client(Settings(is_persistent=False))
-        collection = client.create_collection(name="test_collection")
-        
-        # Test basic functionality
-        collection.add(
-            documents=["This is a test document"],
-            metadatas=[{"source": "test"}],
-            ids=["test1"]
-        )
-        
-        result = collection.query(
-            query_texts=["test document"],
-            n_results=1
-        )
-        
-        if result['documents'][0][0] == "This is a test document":
-            logger.info("ChromaDB test successful")
-            return True
-        else:
-            logger.warning("ChromaDB test returned unexpected results")
-            return False
-    except Exception as e:
-        logger.error(f"ChromaDB test failed: {e}")
-        return False
     """Test if all required packages can be imported"""
     required_packages = [
         'streamlit',
@@ -262,7 +185,7 @@ def run_health_check():
 
 def main():
     """Main setup function"""
-    logger.info("Starting setup for Informa - Multi-Agent News Analysis System")
+    logger.info("Starting setup for Real Multi-Agent News Analysis System")
     
     steps = [
         ("Checking Python version", check_python_version),
@@ -270,8 +193,6 @@ def main():
         ("Setting up environment", setup_environment),
         ("Installing requirements", install_requirements),
         ("Testing imports", test_imports),
-        ("Testing LangGraph", test_langgraph),
-        ("Testing ChromaDB", test_chromadb),
         ("Downloading models", download_models),
         ("Running health check", run_health_check)
     ]

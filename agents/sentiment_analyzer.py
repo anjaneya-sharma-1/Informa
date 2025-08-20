@@ -8,69 +8,72 @@ import os
 
 logger = logging.getLogger(__name__)
 
+# Load Hugging Face API key from secrets file
+HF_API_KEY = None
+try:
+    with open('secrets.env', 'r') as f:
+        for line in f:
+            if line.strip().startswith('HF_API_KEY='):
+                HF_API_KEY = line.strip().split('=', 1)[1].strip()
+except Exception as e:
+    logger.warning(f"Could not load Hugging Face API key: {e}")
+
 class SentimentAnalyzerAgent:
-    def __init__(self, config=None):
-        self.config = config
+    def __init__(self):
         self.last_run = None
         self.last_error = None
-        
-        # Get API configuration dynamically
-        if config:
-            self.api_key = config.get_huggingface_key()
-            models = config.get_huggingface_models()
-            self.api_url = f"https://api-inference.huggingface.co/models/{models['sentiment']}"
-        else:
-            # Fallback to environment/secrets file
-            self.api_key = self._load_api_key_from_secrets()
-            self.api_url = "https://api-inference.huggingface.co/models/cardiffnlp/twitter-roberta-base-sentiment"
-        
+        self.api_url = "https://api-inference.huggingface.co/models/cardiffnlp/twitter-roberta-base-sentiment-latest"
+        self.api_key = HF_API_KEY
         if not self.api_key:
-            logger.warning("No Hugging Face API key found. Sentiment analysis will default to neutral (no keyword fallback).")
-        
+            logger.warning("No Hugging Face API key found. Please add HF_API_KEY to secrets.env.")
         # Label mapping for the model
         self.label_mapping = {
             'LABEL_0': 'negative',
-            'LABEL_1': 'neutral', 
+            'LABEL_1': 'neutral',
             'LABEL_2': 'positive'
         }
-    
-    def _load_api_key_from_secrets(self) -> str:
-        """Load API key from secrets file"""
-        try:
-            with open('secrets.env', 'r') as f:
-                for line in f:
-                    if line.strip().startswith('HF_API_KEY='):
-                        return line.strip().split('=', 1)[1].strip()
-        except Exception as e:
-            logger.warning(f"Could not load Hugging Face API key from secrets: {e}")
-        return None
 
     async def analyze(self, text: str) -> Dict[str, Any]:
-        """Analyze sentiment strictly via Hugging Face model (no keyword fallback)."""
+        """Analyze sentiment of given text using Hugging Face Inference API only."""
         try:
             self.last_run = datetime.now().isoformat()
             if not text or not text.strip():
-                return {'label': 'neutral', 'score': 0.0, 'confidence': 0.0, 'method': 'empty_text'}
-            if not self.api_key:
-                return {'label': 'neutral', 'score': 0.0, 'confidence': 0.0, 'method': 'no_api_key'}
+                return {
+                    'label': 'neutral',
+                    'score': 0.0,
+                    'confidence': 0.0,
+                    'method': 'empty_text'
+                }
             cleaned_text = self._preprocess_text(text)
-            api_result = self._huggingface_api_analysis(cleaned_text)
-            # Strip auxiliary fields, keep core
-            return {
-                'label': api_result.get('label', 'neutral'),
-                'score': api_result.get('score', 0.0),
-                'confidence': api_result.get('confidence', 0.0),
-                'method': 'huggingface_api',
-                'raw_api_result': api_result.get('raw_results', [])
-            }
+            if self.api_key:
+                try:
+                    return self._huggingface_api_analysis(cleaned_text)
+                except Exception as e:
+                    logger.warning(f"Hugging Face API call failed: {e}")
+                    return {
+                        'label': 'neutral',
+                        'score': 0.0,
+                        'confidence': 0.0,
+                        'error': str(e),
+                        'method': 'huggingface_api_error'
+                    }
+            else:
+                return {
+                    'label': 'neutral',
+                    'score': 0.0,
+                    'confidence': 0.0,
+                    'error': 'No Hugging Face API key provided',
+                    'method': 'no_api_key'
+                }
         except Exception as e:
             self.last_error = str(e)
             logger.error(f"Error in sentiment analysis: {e}")
-            return {'label': 'neutral', 'score': 0.0, 'confidence': 0.0, 'error': str(e), 'method': 'error'}
-    
-    # Removed comprehensive/keyword hybrid analysis; only direct HF API is used.
-    
-    # Removed keyword fallback sentiment analysis.
+            return {
+                'label': 'neutral',
+                'score': 0.0,
+                'confidence': 0.0,
+                'error': str(e)
+            }
 
     def _huggingface_api_analysis(self, text: str) -> Dict[str, Any]:
         headers = {"Authorization": f"Bearer {self.api_key}"}
@@ -106,22 +109,11 @@ class SentimentAnalyzerAgent:
                 'raw': results
             }
 
-    # Removed keyword-based sentiment function.
-    
-    # Removed intensity calculation (no longer used without keyword enhancements).
-    
     def _preprocess_text(self, text: str) -> str:
-        """Preprocess text for sentiment analysis"""
-        # Remove URLs
-        text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*$\$,]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '', text)
-        
-        # Remove extra whitespace
+        text = text.lower()
+        text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\$\$,]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '', text)
+        text = re.sub(r'[^a-zA-Z0-9\s.,!?-]', '', text)
         text = ' '.join(text.split())
-        
-        # Limit text length for API (most models have token limits)
-        if len(text) > 500:
-            text = text[:500] + "..."
-        
         return text
     
     async def analyze_batch(self, texts: List[str]) -> List[Dict[str, Any]]:
@@ -175,4 +167,4 @@ class SentimentAnalyzerAgent:
         except Exception as e:
             logger.error(f"Error in emotion breakdown: {e}")
             return {}
-
+    

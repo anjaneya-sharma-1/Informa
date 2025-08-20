@@ -37,10 +37,17 @@ logger = logging.getLogger(__name__)
 
 class VectorDatabase:
     def __init__(self, db_path: str = "news_analysis.db", persist_directory: str = "./chroma_db"):
-        self.db_path = db_path
-        self.persist_directory = persist_directory
-        self.init_database()
-        self.init_chroma_db()
+    # Basic paths
+    self.db_path = db_path
+    self.persist_directory = persist_directory
+    # Chroma state placeholders (will be set in init_chroma_db)
+    self.chroma_enabled = True
+    self.client = None  # type: ignore
+    self.collection = None  # type: ignore
+
+    # Initialize subsystems
+    self.init_database()
+    self.init_chroma_db()
     
     def init_database(self):
         """Initialize the database with required tables"""
@@ -108,6 +115,11 @@ class VectorDatabase:
     def init_chroma_db(self):
         """Initialize ChromaDB client and collection"""
         import os, shutil, time
+        # Allow hard disable (e.g. if environment incompatible): INFORMA_DISABLE_CHROMA=1
+        if os.getenv('INFORMA_DISABLE_CHROMA', '0') == '1':
+            self.chroma_enabled = False
+            logger.warning("Chroma disabled via INFORMA_DISABLE_CHROMA=1; semantic search will use SQLite fallback only.")
+            return
         def _create_client():
             return PersistentClient(
                 path=self.persist_directory,
@@ -135,7 +147,7 @@ class VectorDatabase:
         except Exception as e:
             msg = str(e).lower()
             logger.error(f"Error initializing ChromaDB: {e}")
-            needs_schema_reset = 'no such column' in msg or 'migrate' in msg or 'schema' in msg
+            needs_schema_reset = any(k in msg for k in ('no such column', 'migrate', 'schema', 'tenant'))
             if needs_schema_reset:
                 logger.warning("Detected Chroma schema mismatch; attempting automatic reset.")
                 # Backup existing directory and recreate
@@ -165,11 +177,14 @@ class VectorDatabase:
                         metadata={"description": "Ephemeral fallback (no persistence)"}
                     )
                     logger.warning("Using EphemeralClient fallback (Chroma persistence disabled this run)")
+                    self.chroma_enabled = True
                     return
                 except Exception as ef:
                     logger.error(f"EphemeralClient fallback failed: {ef}")
-            # If all fail, propagate original exception
-            raise
+            # If all fail, degrade
+            self.chroma_enabled = False
+            logger.error("Chroma completely unavailable; semantic search will degrade to keyword/SQLite embedding.")
+            # Do not raise to allow app to continue with degraded functionality
     
     async def store_article(self, article: Dict[str, Any], analysis: Dict[str, Any] = None) -> bool:
         """Store article and its analysis in the database"""
@@ -404,6 +419,9 @@ class VectorDatabase:
                 conn.close()
                 return results
             else:
+                if not self.chroma_enabled or not hasattr(self, 'collection'):
+                    # Fallback: approximate relevance by keyword frequency when Chroma unavailable
+                    return self.search_by_keywords(query, limit=limit)
                 # embedding_or_model is a model object, use ChromaDB as before
                 results = self.collection.query(
                     query_texts=[query],
