@@ -31,7 +31,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
-
+streamlit/secrets.toml
 # Secrets and API keys
 secrets.env
 .env
