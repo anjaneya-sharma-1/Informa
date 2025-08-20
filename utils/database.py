@@ -1,20 +1,12 @@
-# Patch sqlite3 for ChromaDB and log version for diagnostics
+# Patch sqlite3 for ChromaDB
 import sys
-import logging as _logging
-try:
-    import sqlite3 as _builtin_sqlite
-    builtin_version = getattr(_builtin_sqlite, 'sqlite_version', 'unknown')
-except Exception:
-    builtin_version = 'unavailable'
 try:
     import pysqlite3
-    sys.modules["sqlite3"] = pysqlite3  # override
-    import sqlite3 as _patched_sqlite
-    patched_version = getattr(_patched_sqlite, 'sqlite_version', 'unknown')
-    _logging.getLogger(__name__).info(f"Using pysqlite3 (sqlite version {patched_version}); system sqlite was {builtin_version}")
+    # Patch for chromadb compatibility when using streamlit
+    sys.modules["sqlite3"] = pysqlite3
 except ImportError:
-    import sqlite3 as _sqlite_fallback
-    _logging.getLogger(__name__).info(f"pysqlite3 not installed; using builtin sqlite version {builtin_version}")
+    # Use standard sqlite3 if pysqlite3 is not available
+    pass
 
 import sqlite3
 import json
@@ -26,10 +18,6 @@ import streamlit as st
 import asyncio
 import logging
 from chromadb import PersistentClient
-try:  # Ephemeral fallback (older versions may not have it; ignore if missing)
-    from chromadb import EphemeralClient  # type: ignore
-except Exception:  # pragma: no cover
-    EphemeralClient = None  # type: ignore
 from chromadb.config import Settings
 
 
@@ -37,17 +25,10 @@ logger = logging.getLogger(__name__)
 
 class VectorDatabase:
     def __init__(self, db_path: str = "news_analysis.db", persist_directory: str = "./chroma_db"):
-    # Basic paths
-    self.db_path = db_path
-    self.persist_directory = persist_directory
-    # Chroma state placeholders (will be set in init_chroma_db)
-    self.chroma_enabled = True
-    self.client = None  # type: ignore
-    self.collection = None  # type: ignore
-
-    # Initialize subsystems
-    self.init_database()
-    self.init_chroma_db()
+        self.db_path = db_path
+        self.persist_directory = persist_directory
+        self.init_database()
+        self.init_chroma_db()
     
     def init_database(self):
         """Initialize the database with required tables"""
@@ -114,77 +95,27 @@ class VectorDatabase:
     
     def init_chroma_db(self):
         """Initialize ChromaDB client and collection"""
-        import os, shutil, time
-        # Allow hard disable (e.g. if environment incompatible): INFORMA_DISABLE_CHROMA=1
-        if os.getenv('INFORMA_DISABLE_CHROMA', '0') == '1':
-            self.chroma_enabled = False
-            logger.warning("Chroma disabled via INFORMA_DISABLE_CHROMA=1; semantic search will use SQLite fallback only.")
-            return
-        def _create_client():
-            return PersistentClient(
+        try:
+            # Initialize ChromaDB client
+            self.client = PersistentClient(
                 path=self.persist_directory,
                 settings=Settings(
                     anonymized_telemetry=False,
                     allow_reset=True
                 )
             )
-        # Allow forced reset via env
-        force_reset = os.getenv('INFORMA_CHROMA_RESET', '0') == '1'
-        if force_reset and os.path.isdir(self.persist_directory):
-            backup_path = f"{self.persist_directory}_forcebackup_{int(time.time())}"
-            try:
-                shutil.move(self.persist_directory, backup_path)
-                logger.warning(f"Forced reset of Chroma persistence. Old data moved to {backup_path}")
-            except Exception as be:
-                logger.error(f"Could not backup Chroma directory during forced reset: {be}")
-        try:
-            self.client = _create_client()
+            
+            # Create or get collection
             self.collection = self.client.get_or_create_collection(
                 name="news_articles",
                 metadata={"description": "News articles with analysis"}
             )
+            
             logger.info(f"ChromaDB initialized with {self.collection.count()} articles")
+            
         except Exception as e:
-            msg = str(e).lower()
             logger.error(f"Error initializing ChromaDB: {e}")
-            needs_schema_reset = any(k in msg for k in ('no such column', 'migrate', 'schema', 'tenant'))
-            if needs_schema_reset:
-                logger.warning("Detected Chroma schema mismatch; attempting automatic reset.")
-                # Backup existing directory and recreate
-                if os.path.isdir(self.persist_directory):
-                    backup_path = f"{self.persist_directory}_backup_{int(time.time())}"
-                    try:
-                        shutil.move(self.persist_directory, backup_path)
-                        logger.warning(f"Backed up old Chroma directory to {backup_path}")
-                    except Exception as be:
-                        logger.error(f"Failed to backup old Chroma directory: {be}")
-                try:
-                    self.client = _create_client()
-                    self.collection = self.client.get_or_create_collection(
-                        name="news_articles",
-                        metadata={"description": "News articles with analysis"}
-                    )
-                    logger.info("ChromaDB reinitialized after schema reset")
-                    return
-                except Exception as e2:
-                    logger.error(f"Chroma reinit after reset failed: {e2}")
-            # Ephemeral fallback
-            if EphemeralClient is not None:
-                try:
-                    self.client = EphemeralClient(settings=Settings(anonymized_telemetry=False, allow_reset=True))  # type: ignore
-                    self.collection = self.client.get_or_create_collection(
-                        name="news_articles",
-                        metadata={"description": "Ephemeral fallback (no persistence)"}
-                    )
-                    logger.warning("Using EphemeralClient fallback (Chroma persistence disabled this run)")
-                    self.chroma_enabled = True
-                    return
-                except Exception as ef:
-                    logger.error(f"EphemeralClient fallback failed: {ef}")
-            # If all fail, degrade
-            self.chroma_enabled = False
-            logger.error("Chroma completely unavailable; semantic search will degrade to keyword/SQLite embedding.")
-            # Do not raise to allow app to continue with degraded functionality
+            raise
     
     async def store_article(self, article: Dict[str, Any], analysis: Dict[str, Any] = None) -> bool:
         """Store article and its analysis in the database"""
@@ -419,9 +350,6 @@ class VectorDatabase:
                 conn.close()
                 return results
             else:
-                if not self.chroma_enabled or not hasattr(self, 'collection'):
-                    # Fallback: approximate relevance by keyword frequency when Chroma unavailable
-                    return self.search_by_keywords(query, limit=limit)
                 # embedding_or_model is a model object, use ChromaDB as before
                 results = self.collection.query(
                     query_texts=[query],

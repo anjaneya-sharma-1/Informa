@@ -4,7 +4,8 @@ import logging
 from datetime import datetime
 import json
 import os
-from typing import List, Dict, Any, Optional
+import pandas as pd
+from typing import List, Dict, Any, Optional, Callable
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -16,6 +17,7 @@ from utils.config import AppConfig
 from agents.workflow import NewsWorkflow
 from agents.chat_agent import ChatAgent
 from agents.fact_checker import FactCheckerAgent
+from agents.fact_check_pipeline import FactCheckPipeline
 
 # Page config
 st.set_page_config(
@@ -29,16 +31,40 @@ class InformaApp:
     """Main Streamlit application class"""
     
     def __init__(self):
+        # Load configuration
         self.config = AppConfig()
-        self.db = VectorDatabase()
+        
+        # Initialize database
+        self.db = VectorDatabase(
+            db_path=self.config.get_database_setting("db_path") or "news_analysis.db",
+            persist_directory=self.config.get_database_setting("persist_directory") or "./chroma_db"
+        )
+        
+        # Initialize agent workflows
         self.workflow = NewsWorkflow(self.config, self.db)
         self.chat_agent = ChatAgent(self.config, self.db)
+        # Keep legacy FactCheckerAgent (used inside NewsWorkflow) distinct from new lightweight pipeline
         self.fact_checker = FactCheckerAgent(self.config)
+        self.fact_check_pipeline = FactCheckPipeline(self.config)
+        
+        # Track application state
+        self.last_error = None
     
     def run(self):
         """Main application entry point"""
         st.title("🌍 Informa - AI News Analysis & Fact Checking")
-        st.markdown("*Multi-agent RAG system for news analysis and fact verification*")
+        st.markdown("*Multi-agent RAG system powered by LangGraph, ChromaDB, and Hugging Face*")
+        
+        # Show tech stack badges
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.markdown("![LangGraph](https://img.shields.io/badge/LangGraph-Agent_Orchestration-blue)")
+        with col2:
+            st.markdown("![ChromaDB](https://img.shields.io/badge/ChromaDB-Vector_Storage-green)")
+        with col3:
+            st.markdown("![Hugging Face](https://img.shields.io/badge/Hugging_Face-AI_Models-yellow)")
+        with col4:
+            st.markdown("![Streamlit](https://img.shields.io/badge/Streamlit-UI-red)")
         
         # Initialize session state
         self._init_session_state()
@@ -79,85 +105,66 @@ class InformaApp:
         
         if 'workflow_running' not in st.session_state:
             st.session_state.workflow_running = False
+
+        # Ensure defaults for sidebar configuration are present exactly once
+        if 'selected_topics' not in st.session_state:
+            st.session_state.selected_topics = ["technology", "politics", "health"]
+        if 'sentiment_filter' not in st.session_state:
+            st.session_state.sentiment_filter = 'all'
+        if 'bias_threshold' not in st.session_state:
+            st.session_state.bias_threshold = 0.5
+        if 'max_articles' not in st.session_state:
+            st.session_state.max_articles = 20
+        if 'selected_sources' not in st.session_state:
+            st.session_state.selected_sources = []  # Always empty with NewsAPI-only
     
     def _render_sidebar(self):
         """Render sidebar with configuration options"""
         st.sidebar.header("🔧 Configuration")
-        
         # News collection settings
         st.sidebar.subheader("News Collection")
-        
         # Topic selection
         available_topics = [
-            "technology", "politics", "health", "business", 
+            "technology", "politics", "health", "business",
             "science", "world", "entertainment", "sports"
         ]
-        
-        selected_topics = st.sidebar.multiselect(
+        st.sidebar.multiselect(
             "Select Topics",
             available_topics,
-            default=["technology", "politics", "health"],
-            help="Choose news topics to collect"
+            help="Choose news topics to collect",
+            key="selected_topics"
         )
-        
-        # Source selection
-        available_sources = [
-            "bbc", "reuters", "google_news", "reddit", "hackernews"
-        ]
-        
-        selected_sources = st.sidebar.multiselect(
-            "Select Sources",
-            available_sources,
-            default=["bbc", "reuters"],
-            help="Choose news sources to collect from"
-        )
-        
-        # Filter preferences
+        # Content Filters
         st.sidebar.subheader("Content Filters")
-        
-        sentiment_filter = st.sidebar.selectbox(
+        st.sidebar.selectbox(
             "Sentiment Filter",
             ["all", "positive", "neutral", "negative"],
-            help="Filter articles by sentiment"
+            help="Filter articles by sentiment",
+            key="sentiment_filter"
         )
-        
-        bias_threshold = st.sidebar.slider(
+        st.sidebar.slider(
             "Bias Threshold",
-            0.0, 1.0, 0.5,
-            help="Filter articles with bias score below threshold"
+            0.0, 1.0,
+            help="Filter articles with bias score below threshold",
+            key="bias_threshold"
         )
-        
-        max_articles = st.sidebar.number_input(
+        st.sidebar.number_input(
             "Max Articles per Collection",
             min_value=5,
             max_value=100,
-            value=20,
-            help="Maximum number of articles to collect"
+            help="Maximum number of articles to collect",
+            key="max_articles"
         )
-        
-        # Store in session state
-        st.session_state.selected_topics = selected_topics
-        st.session_state.selected_sources = selected_sources
-        st.session_state.sentiment_filter = sentiment_filter
-        st.session_state.bias_threshold = bias_threshold
-        st.session_state.max_articles = max_articles
-        
-        # API Status
-        st.sidebar.subheader("🔌 API Status")
-        hf_key = self.config.get_huggingface_key()
-        if hf_key:
-            st.sidebar.success("✅ Hugging Face API Connected")
-        else:
-            st.sidebar.error("❌ Hugging Face API Key Missing")
-            st.sidebar.info("Add HF_API_KEY to secrets.env file")
-        
+        # Maintain sources empty explicitly
+        st.session_state.selected_sources = []
+    # API Status removed from user UI
+    # LangSmith Monitoring removed from user UI
         # Database info
         total_articles = self.db.get_count()
         st.sidebar.info(f"📚 Total Articles in DB: {total_articles}")
-        
         # Clear database button
         if st.sidebar.button("🗑️ Clear Database", type="secondary"):
-            if st.sidebar.confirm("Are you sure you want to clear all articles?"):
+            if st.sidebar.checkbox("Confirm clearing all articles", key="confirm_clear_db"):
                 self.db.clear_database()
                 st.sidebar.success("Database cleared!")
                 st.rerun()
@@ -250,30 +257,24 @@ class InformaApp:
     def _render_fact_checking_tab(self):
         """Render fact checking interface"""
         st.header("🔍 Fact Checking & Trustworthiness Analysis")
-        
         st.markdown("""
-        **Submit any claim or headline for fact-checking:**
-        
-        The system will:
-        - Search multiple fact-checking sources
-        - Analyze text characteristics and credibility indicators
-        - Provide a trustworthiness score with evidence
-        - Cross-reference with reliable news sources
+        **Submit any claim or headline for focused fact-checking (sentiment + bias + external verdict).**
+        Pipeline: Sentiment model → Bias zero-shot → External Fact Check API (Google Fact Check Tools) → Combined verdict.
         """)
-        
+
         # Fact check input
         claim_input = st.text_area(
             "Enter claim or headline to fact-check:",
             placeholder="Example: 'Scientists discover cure for cancer using AI technology'",
             height=100
         )
-        
+
         col1, col2 = st.columns([1, 4])
-        
+
         with col1:
             if st.button("🔍 Fact Check", type="primary", disabled=not claim_input.strip()):
                 self._run_fact_check(claim_input.strip())
-        
+
         with col2:
             if st.button("📋 Use Sample Claims"):
                 sample_claims = [
@@ -286,12 +287,12 @@ class InformaApp:
                 if st.button("Use Selected Sample"):
                     st.session_state.sample_claim = selected_sample
                     st.rerun()
-        
+
         # Use sample claim if selected
         if hasattr(st.session_state, 'sample_claim'):
             claim_input = st.session_state.sample_claim
             del st.session_state.sample_claim
-        
+
         # Display fact check results
         if st.session_state.fact_check_results:
             st.subheader("🔬 Fact Check Results")
@@ -312,8 +313,8 @@ class InformaApp:
                 st.metric("Total Articles", stats['total_articles'])
             
             with col2:
-                avg_credibility = stats.get('avg_credibility', 0)
-                st.metric("Avg Credibility", f"{avg_credibility:.2f}")
+                # Placeholder: credibility deprecated; show info message
+                st.metric("Fact-Check Enabled", "Yes")
             
             with col3:
                 sentiment_dist = stats.get('sentiment_distribution', {})
@@ -344,12 +345,8 @@ class InformaApp:
             st.subheader("😊 Sentiment Distribution")
             sentiment_dist = stats.get('sentiment_distribution', {})
             if sentiment_dist:
-                import plotly.express as px
-                import pandas as pd
-                
-                df = pd.DataFrame(list(sentiment_dist.items()), columns=['Sentiment', 'Count'])
-                fig = px.pie(df, values='Count', names='Sentiment', title="Article Sentiment Distribution")
-                st.plotly_chart(fig, use_container_width=True)
+                df = pd.DataFrame(list(sentiment_dist.items()), columns=['Sentiment', 'Count']).set_index('Sentiment')
+                st.bar_chart(df)
         else:
             st.info("No articles in database yet. Start collecting news to see statistics!")
     
@@ -360,7 +357,8 @@ class InformaApp:
         try:
             # Get configuration from session state
             topics = st.session_state.get('selected_topics', ['technology'])
-            sources = st.session_state.get('selected_sources', ['bbc'])
+            # Sources are ignored by the workflow; keep empty for clarity
+            sources = []
             max_articles = st.session_state.get('max_articles', 20)
             
             # Create progress container
@@ -410,19 +408,15 @@ class InformaApp:
             return f"Error processing query: {str(e)}"
     
     def _run_fact_check(self, claim: str):
-        """Run fact checking on a claim"""
+        """Run minimal sentiment+bias+verdict pipeline on a claim"""
         try:
-            with st.spinner("🔍 Fact-checking claim..."):
-                result = asyncio.run(self.fact_checker.check_claim(claim))
-                
-                # Store result
+            with st.spinner("🔍 Running fact-check pipeline..."):
+                result = asyncio.run(self.fact_check_pipeline.run(claim))
                 st.session_state.fact_check_results.append(result)
-                
                 st.success("Fact check complete!")
-        
         except Exception as e:
             st.error(f"Error during fact checking: {str(e)}")
-            logger.error(f"Fact check error: {e}")
+            logger.error(f"Fact check pipeline error: {e}")
     
     def _display_article_results(self, articles: List[Dict[str, Any]]):
         """Display article results in a formatted way"""
@@ -464,56 +458,79 @@ class InformaApp:
                     else:
                         st.success(f"✅ Low Bias: {bias_score:.2f}")
                     
-                    # Credibility
-                    credibility = article.get('credibility_score', 0.5)
-                    st.write(f"🔍 Credibility: {credibility:.2f}")
+                    # Fact-check verdict (replaces numeric credibility)
+                    verdict = article.get('fact_check_verdict') or article.get('overall_verdict')
+                    if verdict:
+                        v = verdict.upper()
+                        if 'TRUE' in v and 'FALSE' not in v and 'LIKELY' not in v:
+                            st.success(f"✅ Verdict: {v}")
+                        elif 'FALSE' in v:
+                            st.error(f"❌ Verdict: {v}")
+                        elif 'MIXED' in v or 'PARTIAL' in v:
+                            st.warning(f"⚠️ Verdict: {v}")
+                        else:
+                            st.info(f"ℹ️ Verdict: {v}")
+                        # Show up to first 2 claim verdicts
+                        claims = article.get('fact_check_claims') or []
+                        shown = 0
+                        for claim in claims:
+                            if shown >= 2:
+                                break
+                            c_verdict = (claim.get('verdict') or '').upper()
+                            claim_txt = claim.get('claim', '')[:80]
+                            if c_verdict == 'TRUE':
+                                st.caption(f"✅ '{claim_txt}'")
+                            elif c_verdict == 'FALSE':
+                                st.caption(f"❌ '{claim_txt}'")
+                            elif c_verdict in ('MIXED','PARTIALLY TRUE'):
+                                st.caption(f"⚠️ '{claim_txt}' ({c_verdict})")
+                            else:
+                                st.caption(f"ℹ️ '{claim_txt}' (UNVERIFIED)")
+                            shown += 1
     
     def _display_fact_check_result(self, result: Dict[str, Any]):
-        """Display fact check result"""
-        with st.expander(f"🔍 {result.get('original_claim', '')[:100]}..."):
-            
-            # Credibility score with color coding
-            credibility = result.get('credibility_score', 0.5)
-            
-            col1, col2 = st.columns([2, 1])
-            
+        """Display pipeline fact check result (sentiment + bias + verdict)."""
+        with st.expander(f"🔍 {result.get('original_claim','')[:100]}..."):
+            col1, col2 = st.columns([3,1])
             with col1:
-                st.write(f"**Original Claim:** {result.get('original_claim', '')}")
-                
-                analysis = result.get('analysis', {})
-                if analysis:
-                    st.write(f"**Analysis:** {analysis.get('summary', 'No analysis available')}")
-                
-                # Evidence
-                evidence = result.get('evidence', [])
-                if evidence:
-                    st.write("**Supporting Evidence:**")
-                    for item in evidence[:3]:  # Show top 3
-                        st.write(f"- {item}")
-                
-                contradictions = result.get('contradictions', [])
-                if contradictions:
-                    st.write("**Contradicting Evidence:**")
-                    for item in contradictions[:3]:  # Show top 3
-                        st.write(f"- {item}")
-            
+                st.write(f"**Original Claim:** {result.get('original_claim','')}")
+                verdict = result.get('overall_verdict') or (result.get('fact_check') or {}).get('overall_verdict')
+                if verdict:
+                    v = verdict.upper()
+                    if 'TRUE' in v and 'FALSE' not in v:
+                        st.success(f"✅ Verdict: {v}")
+                    elif 'FALSE' in v:
+                        st.error(f"❌ Verdict: {v}")
+                    elif 'MIXED' in v or 'PARTIAL' in v:
+                        st.warning(f"⚠️ Verdict: {v}")
+                    else:
+                        st.info(f"ℹ️ Verdict: {v}")
+                claims = (result.get('fact_check') or {}).get('claims', [])
+                if claims:
+                    st.write("**Claim Reviews:**")
+                    for c in claims[:4]:
+                        tag = c.get('verdict','UNVERIFIED')
+                        snippet = c.get('claim','')[:90]
+                        st.caption(f"[{tag}] {snippet}")
             with col2:
-                # Credibility score
-                if credibility >= 0.7:
-                    st.success(f"✅ High Credibility: {credibility:.2f}")
-                elif credibility >= 0.4:
-                    st.warning(f"⚠️ Medium Credibility: {credibility:.2f}")
+                sent = (result.get('sentiment') or {})
+                label = sent.get('label','neutral')
+                if label == 'positive':
+                    st.success(f"Sentiment: {label}")
+                elif label == 'negative':
+                    st.error(f"Sentiment: {label}")
                 else:
-                    st.error(f"❌ Low Credibility: {credibility:.2f}")
-                
-                # Confidence
-                confidence = result.get('confidence', 'medium')
-                st.write(f"**Confidence:** {confidence}")
-                
-                # Sources checked
-                sources = result.get('sources_checked', [])
-                if sources:
-                    st.write(f"**Sources:** {len(sources)} checked")
+                    st.info(f"Sentiment: {label}")
+                st.write(f"Confidence: {sent.get('confidence',0.0):.2f}")
+                bias = (result.get('bias') or {})
+                bscore = bias.get('overall_bias_score',0.0)
+                if bscore > 0.7:
+                    st.warning(f"Bias: {bscore:.2f}")
+                elif bscore > 0.4:
+                    st.info(f"Bias: {bscore:.2f}")
+                else:
+                    st.success(f"Bias: {bscore:.2f}")
+                st.write(f"Method: {result.get('method','')}")
 
 def main():
     """Main application entry point"""
