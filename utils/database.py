@@ -26,6 +26,10 @@ import streamlit as st
 import asyncio
 import logging
 from chromadb import PersistentClient
+try:  # Ephemeral fallback (older versions may not have it; ignore if missing)
+    from chromadb import EphemeralClient  # type: ignore
+except Exception:  # pragma: no cover
+    EphemeralClient = None  # type: ignore
 from chromadb.config import Settings
 
 
@@ -103,26 +107,68 @@ class VectorDatabase:
     
     def init_chroma_db(self):
         """Initialize ChromaDB client and collection"""
-        try:
-            # Initialize ChromaDB client
-            self.client = PersistentClient(
+        import os, shutil, time
+        def _create_client():
+            return PersistentClient(
                 path=self.persist_directory,
                 settings=Settings(
                     anonymized_telemetry=False,
                     allow_reset=True
                 )
             )
-            
-            # Create or get collection
+        # Allow forced reset via env
+        force_reset = os.getenv('INFORMA_CHROMA_RESET', '0') == '1'
+        if force_reset and os.path.isdir(self.persist_directory):
+            backup_path = f"{self.persist_directory}_forcebackup_{int(time.time())}"
+            try:
+                shutil.move(self.persist_directory, backup_path)
+                logger.warning(f"Forced reset of Chroma persistence. Old data moved to {backup_path}")
+            except Exception as be:
+                logger.error(f"Could not backup Chroma directory during forced reset: {be}")
+        try:
+            self.client = _create_client()
             self.collection = self.client.get_or_create_collection(
                 name="news_articles",
                 metadata={"description": "News articles with analysis"}
             )
-            
             logger.info(f"ChromaDB initialized with {self.collection.count()} articles")
-            
         except Exception as e:
+            msg = str(e).lower()
             logger.error(f"Error initializing ChromaDB: {e}")
+            needs_schema_reset = 'no such column' in msg or 'migrate' in msg or 'schema' in msg
+            if needs_schema_reset:
+                logger.warning("Detected Chroma schema mismatch; attempting automatic reset.")
+                # Backup existing directory and recreate
+                if os.path.isdir(self.persist_directory):
+                    backup_path = f"{self.persist_directory}_backup_{int(time.time())}"
+                    try:
+                        shutil.move(self.persist_directory, backup_path)
+                        logger.warning(f"Backed up old Chroma directory to {backup_path}")
+                    except Exception as be:
+                        logger.error(f"Failed to backup old Chroma directory: {be}")
+                try:
+                    self.client = _create_client()
+                    self.collection = self.client.get_or_create_collection(
+                        name="news_articles",
+                        metadata={"description": "News articles with analysis"}
+                    )
+                    logger.info("ChromaDB reinitialized after schema reset")
+                    return
+                except Exception as e2:
+                    logger.error(f"Chroma reinit after reset failed: {e2}")
+            # Ephemeral fallback
+            if EphemeralClient is not None:
+                try:
+                    self.client = EphemeralClient(settings=Settings(anonymized_telemetry=False, allow_reset=True))  # type: ignore
+                    self.collection = self.client.get_or_create_collection(
+                        name="news_articles",
+                        metadata={"description": "Ephemeral fallback (no persistence)"}
+                    )
+                    logger.warning("Using EphemeralClient fallback (Chroma persistence disabled this run)")
+                    return
+                except Exception as ef:
+                    logger.error(f"EphemeralClient fallback failed: {ef}")
+            # If all fail, propagate original exception
             raise
     
     async def store_article(self, article: Dict[str, Any], analysis: Dict[str, Any] = None) -> bool:
