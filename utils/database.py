@@ -1,12 +1,20 @@
-# Patch sqlite3 for ChromaDB
+# Patch sqlite3 for ChromaDB and log version for diagnostics
 import sys
+import logging as _logging
+try:
+    import sqlite3 as _builtin_sqlite
+    builtin_version = getattr(_builtin_sqlite, 'sqlite_version', 'unknown')
+except Exception:
+    builtin_version = 'unavailable'
 try:
     import pysqlite3
-    # Patch for chromadb compatibility when using streamlit
-    sys.modules["sqlite3"] = pysqlite3
+    sys.modules["sqlite3"] = pysqlite3  # override
+    import sqlite3 as _patched_sqlite
+    patched_version = getattr(_patched_sqlite, 'sqlite_version', 'unknown')
+    _logging.getLogger(__name__).info(f"Using pysqlite3 (sqlite version {patched_version}); system sqlite was {builtin_version}")
 except ImportError:
-    # Use standard sqlite3 if pysqlite3 is not available
-    pass
+    import sqlite3 as _sqlite_fallback
+    _logging.getLogger(__name__).info(f"pysqlite3 not installed; using builtin sqlite version {builtin_version}")
 
 import sqlite3
 import json
